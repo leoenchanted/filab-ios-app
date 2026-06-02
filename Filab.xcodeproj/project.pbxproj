@@ -27,6 +27,7 @@
 		5A928D0C2F7D86D9008C8502 /* Filab.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Filab.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		5A928D192F7D86DB008C8502 /* FilabTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = FilabTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		5A928D232F7D86DB008C8502 /* FilabUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = FilabUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		5A928D712F7E19CB008C8502 /* FilmLab.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = FilmLab.xcodeproj; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -89,6 +90,11 @@
 				5A928D192F7D86DB008C8502 /* FilabTests.xctest */,
 				5A928D232F7D86DB008C8502 /* FilabUITests.xctest */,
 			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		5A928D722F7E19CB008C8502 /* Products */ = {
+			isa = PBXGroup;
 			name = Products;
 			sourceTree = "<group>";
 		};
@@ -198,6 +204,12 @@
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 5A928D0D2F7D86D9008C8502 /* Products */;
 			projectDirPath = "";
+			projectReferences = (
+				{
+					ProductGroup = 5A928D722F7E19CB008C8502 /* Products */;
+					ProjectRef = 5A928D712F7E19CB008C8502 /* FilmLab.xcodeproj */;
+				},
+			);
 			projectRoot = "";
 			targets = (
 				5A928D0B2F7D86D9008C8502 /* Filab */,
@@ -395,8 +407,12 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = RLAF2V3H58;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSCameraUsageDescription = "需要访问相机权限以拍摄照片并保存到系统相册";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "需要访问相册权限以保存编辑后的照片";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "需要访问相册权限以选择照片进行编辑";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -426,8 +442,12 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = RLAF2V3H58;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSCameraUsageDescription = "需要访问相机权限以拍摄照片并保存到系统相册";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "需要访问相册权限以保存编辑后的照片";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "需要访问相册权限以选择照片进行编辑";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
