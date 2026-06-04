@@ -11,36 +11,36 @@ final class MetalFilmProcessor: @unchecked Sendable {
 
     static let shared = MetalFilmProcessor()
 
-    private var device: MTLDevice?
-    private var commandQueue: MTLCommandQueue?
-    private var library: MTLLibrary?
+    nonisolated(unsafe) private var device: MTLDevice?
+    nonisolated(unsafe) private var commandQueue: MTLCommandQueue?
+    nonisolated(unsafe) private var library: MTLLibrary?
 
     // Pipeline states
-    private var filmPipelineState: MTLRenderPipelineState?
-    private var adjustPipelineState: MTLRenderPipelineState?
-    private var blurPipelineState: MTLRenderPipelineState?
-    private var halationPipelineState: MTLRenderPipelineState?
-    private var compositePipelineState: MTLRenderPipelineState?
+    nonisolated(unsafe) private var filmPipelineState: MTLRenderPipelineState?
+    nonisolated(unsafe) private var adjustPipelineState: MTLRenderPipelineState?
+    nonisolated(unsafe) private var blurPipelineState: MTLRenderPipelineState?
+    nonisolated(unsafe) private var halationPipelineState: MTLRenderPipelineState?
+    nonisolated(unsafe) private var compositePipelineState: MTLRenderPipelineState?
 
     // Textures
-    private var sourceTexture: MTLTexture?
-    private var filmSimulatedTexture: MTLTexture?  // 胶片模拟后的纹理
-    private var processedTexture: MTLTexture?
-    private var bloomTexture: MTLTexture?
-    private var intermediateTexture: MTLTexture?
+    nonisolated(unsafe) private var sourceTexture: MTLTexture?
+    nonisolated(unsafe) private var filmSimulatedTexture: MTLTexture?  // 胶片模拟后的纹理
+    nonisolated(unsafe) private var processedTexture: MTLTexture?
+    nonisolated(unsafe) private var bloomTexture: MTLTexture?
+    nonisolated(unsafe) private var intermediateTexture: MTLTexture?
 
     // Flag: 是否需要重新跑胶片管线
-    private var needsFilmUpdate = true
+    nonisolated(unsafe) private var needsFilmUpdate = true
 
     // Vertex buffer
-    private var vertexBuffer: MTLBuffer?
+    nonisolated(unsafe) private var vertexBuffer: MTLBuffer?
 
     // Current processing state
-    private(set) var isProcessing = false
-    private(set) var progress: Float = 0
+    nonisolated(unsafe) private(set) var isProcessing = false
+    nonisolated(unsafe) private(set) var progress: Float = 0
 
     // Time for grain animation
-    private var grainTime: Float = 0
+    nonisolated(unsafe) private var grainTime: Float = 0
     private let processingLock = NSLock()
 
     // MARK: - Initialization
@@ -163,7 +163,7 @@ final class MetalFilmProcessor: @unchecked Sendable {
 
     // MARK: - Texture Management
 
-    func loadImage(_ image: UIImage) -> Bool {
+    nonisolated func loadImage(_ image: UIImage) -> Bool {
         processingLock.lock()
         defer { processingLock.unlock() }
 
@@ -235,7 +235,7 @@ final class MetalFilmProcessor: @unchecked Sendable {
 
     // MARK: - Processing
 
-    func processImage(preset: FilmPreset, adjustments: AdjustmentParams,
+    nonisolated func processImage(preset: FilmPreset, adjustments: AdjustmentParams,
                       isCompare: Bool = false) -> UIImage? {
         processingLock.lock()
         defer { processingLock.unlock() }
@@ -301,14 +301,14 @@ final class MetalFilmProcessor: @unchecked Sendable {
     }
 
     /// 标记胶片管线需要重新运行（预设切换时调用）
-    func markFilmDirty() {
+    nonisolated func markFilmDirty() {
         processingLock.lock()
         defer { processingLock.unlock() }
         needsFilmUpdate = true
     }
 
     /// 检测 opacity 是否变化，如果变化也标记胶片管线脏
-    func markFilmDirtyIfOpacityChanged(_ oldOpacity: Double, _ newOpacity: Double) {
+    nonisolated func markFilmDirtyIfOpacityChanged(_ oldOpacity: Double, _ newOpacity: Double) {
         if abs(oldOpacity - newOpacity) > 0.01 {
             processingLock.lock()
             defer { processingLock.unlock() }
@@ -316,10 +316,10 @@ final class MetalFilmProcessor: @unchecked Sendable {
         }
     }
 
-    private func applyFilmEffect(commandBuffer: MTLCommandBuffer,
-                                preset: FilmPreset,
-                                adjustments _: AdjustmentParams,
-                                outputTexture: MTLTexture? = nil) {
+    nonisolated private func applyFilmEffect(commandBuffer: MTLCommandBuffer,
+                                             preset: FilmPreset,
+                                             adjustments _: AdjustmentParams,
+                                             outputTexture: MTLTexture? = nil) {
         let targetTexture = outputTexture ?? processedTexture!
 
         guard let device = device else {
@@ -511,9 +511,9 @@ final class MetalFilmProcessor: @unchecked Sendable {
     }
 
     /// Lightweight ADJUST shader - reads from filmSimulatedTexture, applies only slider params
-    private func applyAdjustEffect(commandBuffer: MTLCommandBuffer,
-                                  adjustments: AdjustmentParams,
-                                  outputTexture: MTLTexture) {
+    nonisolated private func applyAdjustEffect(commandBuffer: MTLCommandBuffer,
+                                               adjustments: AdjustmentParams,
+                                               outputTexture: MTLTexture) {
         guard let device = device,
               let adjustPipelineState = adjustPipelineState,
               let filmSimulatedTexture = filmSimulatedTexture,
@@ -642,8 +642,8 @@ final class MetalFilmProcessor: @unchecked Sendable {
         renderEncoder.endEncoding()
     }
 
-    private func applyHalation(commandBuffer: MTLCommandBuffer,
-                              config: HalationConfig) {
+    nonisolated private func applyHalation(commandBuffer: MTLCommandBuffer,
+                                           config: HalationConfig) {
         guard let device = device,
               let filmSimulatedTexture = filmSimulatedTexture,
               let bloomTexture = bloomTexture,
@@ -775,15 +775,15 @@ final class MetalFilmProcessor: @unchecked Sendable {
         blitEncoder.endEncoding()
     }
 
-    private func compositeResult(commandBuffer: MTLCommandBuffer,
-                                opacity: Float,
-                                isCompare: Bool) {
+    nonisolated private func compositeResult(commandBuffer: MTLCommandBuffer,
+                                             opacity: Float,
+                                             isCompare: Bool) {
         // Currently just copies processedTexture to itself or does nothing
         // This is a placeholder for future implementation
         progress = 0.95
     }
 
-    private func getResultImage() -> UIImage? {
+    nonisolated private func getResultImage() -> UIImage? {
         guard let processedTexture = processedTexture else { return nil }
 
         let width = processedTexture.width
@@ -836,6 +836,8 @@ final class MetalFilmProcessor: @unchecked Sendable {
 // MARK: - Adjust Uniforms Structure (matching Metal adjust shader)
 
 private struct AdjustUniforms {
+    nonisolated init() {}
+
     // Order must match the Metal AdjustUniforms struct
     var exposure: Float = 0.0
     var contrast: Float = 1.0
@@ -904,9 +906,11 @@ private struct HalationUniforms {
 // MARK: - Film Uniforms Structure (matching Metal shader)
 
 // Maximum curve control points (matching Metal shader)
-private let MAX_CURVE_POINTS = 8
+nonisolated private let MAX_CURVE_POINTS = 8
 
 private struct FilmUniforms {
+    nonisolated init() {}
+
     // Simplified layout - use inline SIMD2<Float> instead of struct wrapper
     // This avoids Swift's automatic padding for nested struct alignment
 
@@ -1013,7 +1017,7 @@ private struct FilmUniforms {
 // MARK: - Comparable Clamping Extension
 
 private extension Comparable {
-    func clamped(to range: ClosedRange<Self>) -> Self {
+    nonisolated func clamped(to range: ClosedRange<Self>) -> Self {
         return min(max(self, range.lowerBound), range.upperBound)
     }
 }

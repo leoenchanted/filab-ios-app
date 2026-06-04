@@ -173,13 +173,6 @@ struct AdjustUniforms {
     int _padI;
 };
 
-// MARK: - Vertex Shader
-
-vertex VertexOut vertexShader(
-    uint vertexID [[vertex_id]],
-    constant float2 *positions [[buffer(0)]]
-);
-
 // MARK: - Helper Function Prototypes
 
 // Color space conversion

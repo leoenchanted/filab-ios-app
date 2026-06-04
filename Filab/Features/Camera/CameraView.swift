@@ -345,16 +345,25 @@ struct CameraView: View {
     private var liveViewfinder: some View {
         ZStack {
             if camera.isAuthorized, camera.isConfigured {
-                CameraPreviewView(
-                    session: camera.session,
-                    device: camera.currentDevice,
-                    isMirrored: camera.cameraPosition == .front,
-                    onCaptureRotationAngleChanged: camera.updateCaptureRotationAngle(_:),
-                    onTapToFocus: handleFocusTap(devicePoint:viewPoint:)
-                )
-                .saturation(activePreviewPreset?.cameraPreviewSaturation ?? 1)
-                .contrast(activePreviewPreset?.cameraPreviewContrast ?? 1)
-                .overlay(filmPreviewOverlay.allowsHitTesting(false))
+                Group {
+                    if let activePreviewPreset {
+                        MetalCameraPreviewView(
+                            frameSource: camera.previewFrameSource,
+                            preset: activePreviewPreset,
+                            isMirrored: camera.cameraPosition == .front,
+                            onTapToFocus: handleFocusTap(devicePoint:viewPoint:)
+                        )
+                    } else {
+                        CameraPreviewView(
+                            session: camera.session,
+                            device: camera.currentDevice,
+                            isMirrored: camera.cameraPosition == .front,
+                            onCaptureRotationAngleChanged: camera.updateCaptureRotationAngle(_:),
+                            onTapToFocus: handleFocusTap(devicePoint:viewPoint:)
+                        )
+                    }
+                }
+                // 暗角：基于空间位置的效果，shader 不含此
                 .overlay(vignetteOverlay.allowsHitTesting(false))
                 .gesture(
                     MagnificationGesture()
@@ -760,16 +769,6 @@ struct CameraView: View {
                 .background(isSelected ? color : Color.white.opacity(0.10), in: Capsule())
         }
         .buttonStyle(.plain)
-    }
-
-    private var filmPreviewOverlay: some View {
-        LinearGradient(
-            colors: activePreviewPreset?.cameraPreviewOverlayColors ?? [.clear, .clear],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
-        .blendMode(.softLight)
-        .opacity(activePreviewPreset?.cameraPreviewOverlayOpacity ?? 0)
     }
 
     private var vignetteOverlay: some View {

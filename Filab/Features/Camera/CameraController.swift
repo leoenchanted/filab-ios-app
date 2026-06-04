@@ -1,4 +1,4 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import Combine
 import UIKit
 
@@ -17,7 +17,10 @@ struct CameraCaptureResult {
 
 @MainActor
 final class CameraController: NSObject, ObservableObject {
-    let session = AVCaptureSession()
+    // AVCaptureSession / AVCapturePhotoOutput 等是 Apple 线程安全对象，
+    // 在 sessionQueue 上操作是设计意图。nonisolated(unsafe) 告知 Swift 6 此访问是安全的。
+    nonisolated(unsafe) let session = AVCaptureSession()
+    let previewFrameSource = CameraPreviewFrameSource()
 
     @Published private(set) var authorizationStatus = AVCaptureDevice.authorizationStatus(for: .video)
     @Published private(set) var isConfigured = false
@@ -50,17 +53,19 @@ final class CameraController: NSObject, ObservableObject {
     @Published var captureFormat: CameraCaptureFormat = .jpeg
     @Published private var errorMessage: String?
 
-    private let photoOutput = AVCapturePhotoOutput()
-    private let videoDataOutput = AVCaptureVideoDataOutput()
+    nonisolated(unsafe) private let photoOutput = AVCapturePhotoOutput()
+    nonisolated(unsafe) private let videoDataOutput = AVCaptureVideoDataOutput()
     // FIX 1: 专用 session 队列，session 的阻塞操作全部在此队列执行，避免卡主线程
     private let sessionQueue = DispatchQueue(label: "filab.camera.session")
-    private let videoDataOutputQueue = DispatchQueue(label: "filab.camera.histogram")
-    private let histogramSampler = CameraHistogramSampler()
-    private var videoInput: AVCaptureDeviceInput?
-    private var photoCaptureDelegate: PhotoCaptureDelegate?
+    private let videoDataOutputQueue = DispatchQueue(label: "filab.camera.video")
+    private let histogramSampler: CameraHistogramSampler
+    nonisolated(unsafe) private var videoInput: AVCaptureDeviceInput?
+    nonisolated(unsafe) private var photoCaptureDelegate: PhotoCaptureDelegate?
+    nonisolated(unsafe) private var rotationCoordinator: AVCaptureDevice.RotationCoordinator?
+    nonisolated(unsafe) private var captureRotationObservation: NSKeyValueObservation?
     private var pinchBaseZoomFactor: CGFloat = 1
-    private var captureRotationAngle: CGFloat = 0
-    private var configuredMaxPhotoDimensions: CMVideoDimensions?
+    nonisolated(unsafe) private var captureRotationAngle: CGFloat = 0
+    nonisolated(unsafe) private var configuredMaxPhotoDimensions: CMVideoDimensions?
 
     var isAuthorized: Bool {
         authorizationStatus == .authorized
@@ -80,6 +85,18 @@ final class CameraController: NSObject, ObservableObject {
 
     var canSwitchCamera: Bool {
         isAuthorized && isConfigured
+    }
+
+    // 显式 init 以初始化 histogramSampler
+    // onHistogram callback 也在此处设置（init 在 @MainActor 上运行，可避免 closure 跨隔离问题）
+    override init() {
+        histogramSampler = CameraHistogramSampler(frameSource: previewFrameSource)
+        super.init()
+        histogramSampler.onHistogram = { [weak self] bins in
+            Task { @MainActor in
+                self?.histogramBins = bins
+            }
+        }
     }
 
     var availableCaptureFormats: [CameraCaptureFormat] {
@@ -400,7 +417,8 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     func updateCaptureRotationAngle(_ angle: CGFloat) {
-        captureRotationAngle = Self.normalizedRotationAngle(angle)
+        let normalizedAngle = Self.normalizedRotationAngle(angle)
+        setCaptureRotationAngle(normalizedAngle)
     }
 
     func capturePhoto(completion: @escaping (Result<CameraCaptureResult, Error>) -> Void) {
@@ -470,8 +488,11 @@ final class CameraController: NSObject, ObservableObject {
     private func configureSessionIfNeeded() {
         guard !isConfigured else { return }
 
+        // 在主线程捕获 isConfigured 快照，避免在 Sendable 闭包中读取 @MainActor 属性
+        let alreadyConfigured = isConfigured
         sessionQueue.async { [weak self] in
-            guard let self, !self.isConfigured else { return }
+            guard let self else { return }
+            if alreadyConfigured { return }
 
             self.session.beginConfiguration()
             self.session.sessionPreset = .photo
@@ -519,7 +540,8 @@ final class CameraController: NSObject, ObservableObject {
 
     // 注意：此方法需要在已持有 session.beginConfiguration 的上下文中调用
     // @Published 属性的更新通过 DispatchQueue.main.async 回到主线程
-    private func applyCamera(position: AVCaptureDevice.Position) throws {
+    // nonisolated: 允许从 sessionQueue 的 Sendable 闭包调用
+    nonisolated private func applyCamera(position: AVCaptureDevice.Position) throws {
         if let videoInput {
             session.removeInput(videoInput)
         }
@@ -586,10 +608,14 @@ final class CameraController: NSObject, ObservableObject {
             print("Filab camera max photo dimensions: \(bestDimensions.width)x\(bestDimensions.height) (\(photoDimensionsDisplay))")
         }
 
+        // videoInput 可直接设置（nonisolated(unsafe)），@Published 属性通过 DispatchQueue.main.async 回主线程
+        videoInput = input
+        configureRotationCoordinator(for: device, isMirrored: position == .front)
+        applyVideoDataOutputPreviewTransform()
+
         // 回主线程更新所有 @Published 状态
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.videoInput = input
             self.cameraPosition = position
 
             self.minZoomFactor = clampedZoomMin
@@ -653,23 +679,53 @@ final class CameraController: NSObject, ObservableObject {
         isWhiteBalanceLocked = device.whiteBalanceMode == .locked
     }
 
-    private func configureHistogramOutputIfPossible() {
+    nonisolated private func configureHistogramOutputIfPossible() {
         guard session.canAddOutput(videoDataOutput) else { return }
 
         videoDataOutput.alwaysDiscardsLateVideoFrames = true
+        videoDataOutput.automaticallyConfiguresOutputBufferDimensions = false
+        videoDataOutput.deliversPreviewSizedOutputBuffers = true
         videoDataOutput.videoSettings = [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+            kCVPixelBufferMetalCompatibilityKey as String: true
         ]
-        histogramSampler.onHistogram = { [weak self] bins in
-            Task { @MainActor in
-                self?.histogramBins = bins
-            }
-        }
+        // onHistogram callback 已在 init() 中设置
         videoDataOutput.setSampleBufferDelegate(histogramSampler, queue: videoDataOutputQueue)
         session.addOutput(videoDataOutput)
+        applyVideoDataOutputPreviewTransform()
     }
 
-    private func updateRawCaptureAvailability() {
+    nonisolated private func applyVideoDataOutputPreviewTransform() {
+        guard let connection = videoDataOutput.connection(with: .video) else { return }
+
+        let viewfinderAngle: CGFloat = 90
+        if connection.isVideoRotationAngleSupported(viewfinderAngle) {
+            connection.videoRotationAngle = viewfinderAngle
+        }
+
+        if connection.isVideoMirroringSupported {
+            connection.automaticallyAdjustsVideoMirroring = false
+            connection.isVideoMirrored = false
+        }
+    }
+
+    nonisolated private func configureRotationCoordinator(for device: AVCaptureDevice, isMirrored _: Bool) {
+        let coordinator = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: nil)
+        rotationCoordinator = coordinator
+        captureRotationObservation = coordinator.observe(
+            \.videoRotationAngleForHorizonLevelCapture,
+            options: [.initial, .new]
+        ) { [weak self] coordinator, _ in
+            let angle = Self.normalizedRotationAngle(coordinator.videoRotationAngleForHorizonLevelCapture)
+            self?.setCaptureRotationAngle(angle)
+        }
+    }
+
+    nonisolated private func setCaptureRotationAngle(_ angle: CGFloat) {
+        captureRotationAngle = angle
+    }
+
+    nonisolated private func updateRawCaptureAvailability() {
         let rawFormats = photoOutput.availableRawPhotoPixelFormatTypes
         let proRawAvailable = rawFormats.contains {
             AVCapturePhotoOutput.isAppleProRAWPixelFormat($0)
@@ -768,7 +824,7 @@ final class CameraController: NSObject, ObservableObject {
         }
     }
 
-    private static func shutterSpeedDisplay(seconds: Double) -> String {
+    nonisolated private static func shutterSpeedDisplay(seconds: Double) -> String {
         guard seconds > 0 else { return "--" }
 
         if seconds >= 1 {
@@ -778,13 +834,13 @@ final class CameraController: NSObject, ObservableObject {
         return "1/\(Int((1 / seconds).rounded()))"
     }
 
-    private static func normalizedRotationAngle(_ angle: CGFloat) -> CGFloat {
+    nonisolated private static func normalizedRotationAngle(_ angle: CGFloat) -> CGFloat {
         let rounded = (angle / 90).rounded() * 90
         let normalized = rounded.truncatingRemainder(dividingBy: 360)
         return normalized >= 0 ? normalized : normalized + 360
     }
 
-    private static func bestCamera(for position: AVCaptureDevice.Position) -> AVCaptureDevice? {
+    nonisolated private static func bestCamera(for position: AVCaptureDevice.Position) -> AVCaptureDevice? {
         let deviceTypes: [AVCaptureDevice.DeviceType]
 
         if position == .back {
@@ -812,33 +868,33 @@ final class CameraController: NSObject, ObservableObject {
         }
     }
 
-    private func configureMaximumPhotoDimensionsForCurrentFormat() {
+    nonisolated private func configureMaximumPhotoDimensionsForCurrentFormat() {
         guard let dimensions = configuredMaxPhotoDimensions else { return }
         photoOutput.maxPhotoDimensions = dimensions
     }
 
-    private static func bestPhotoFormat(for device: AVCaptureDevice) -> AVCaptureDevice.Format? {
+    nonisolated private static func bestPhotoFormat(for device: AVCaptureDevice) -> AVCaptureDevice.Format? {
         device.formats.max { first, second in
             photoArea(bestPhotoDimensions(for: first)) < photoArea(bestPhotoDimensions(for: second))
         }
     }
 
-    private static func bestPhotoDimensions(for device: AVCaptureDevice) -> CMVideoDimensions? {
+    nonisolated private static func bestPhotoDimensions(for device: AVCaptureDevice) -> CMVideoDimensions? {
         bestPhotoFormat(for: device).flatMap { bestPhotoDimensions(for: $0) }
     }
 
-    private static func bestPhotoDimensions(for format: AVCaptureDevice.Format) -> CMVideoDimensions? {
+    nonisolated private static func bestPhotoDimensions(for format: AVCaptureDevice.Format) -> CMVideoDimensions? {
         format.supportedMaxPhotoDimensions.max { first, second in
             photoArea(first) < photoArea(second)
         }
     }
 
-    private static func photoArea(_ dimensions: CMVideoDimensions?) -> Int64 {
+    nonisolated private static func photoArea(_ dimensions: CMVideoDimensions?) -> Int64 {
         guard let dimensions else { return 0 }
         return Int64(dimensions.width) * Int64(dimensions.height)
     }
 
-    private static func photoDimensionsDisplay(_ dimensions: CMVideoDimensions?) -> String {
+    nonisolated private static func photoDimensionsDisplay(_ dimensions: CMVideoDimensions?) -> String {
         guard let dimensions else { return "--MP" }
         let megapixels = Double(photoArea(dimensions)) / 1_000_000.0
         return "\(Int(megapixels.rounded()))MP"
@@ -936,6 +992,40 @@ private final class PhotoCaptureDelegate: NSObject, AVCapturePhotoCaptureDelegat
     }
 }
 
+final class CameraPreviewFrameSource: @unchecked Sendable {
+    private let lock = NSLock()
+    nonisolated(unsafe) private var pixelBuffer: CVPixelBuffer?
+    nonisolated(unsafe) private var frameID: UInt64 = 0
+
+    nonisolated init() {}
+
+    nonisolated func update(pixelBuffer: CVPixelBuffer) {
+        lock.lock()
+        self.pixelBuffer = pixelBuffer
+        frameID &+= 1
+        lock.unlock()
+    }
+
+    nonisolated func latestFrame() -> (pixelBuffer: CVPixelBuffer, frameID: UInt64)? {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard let pixelBuffer else { return nil }
+        return (pixelBuffer, frameID)
+    }
+
+    nonisolated func latestFrameSize() -> CGSize {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard let pixelBuffer else { return .zero }
+        return CGSize(
+            width: CVPixelBufferGetWidthOfPlane(pixelBuffer, 0),
+            height: CVPixelBufferGetHeightOfPlane(pixelBuffer, 0)
+        )
+    }
+}
+
 private final class CameraHistogramSampler: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     static let placeholderBins: [CGFloat] = [
         0.14, 0.24, 0.44, 0.68, 0.82, 0.74, 0.55, 0.39,
@@ -944,19 +1034,30 @@ private final class CameraHistogramSampler: NSObject, AVCaptureVideoDataOutputSa
         0.24, 0.20, 0.18, 0.16, 0.13, 0.10, 0.08, 0.06
     ]
 
-    var onHistogram: (([CGFloat]) -> Void)?
+    private let frameSource: CameraPreviewFrameSource
+    nonisolated(unsafe) var onHistogram: (([CGFloat]) -> Void)?
 
-    private var frameIndex = 0
+    nonisolated(unsafe) private var frameIndex = 0
     private let binCount = 32
 
-    func captureOutput(
+    init(frameSource: CameraPreviewFrameSource) {
+        self.frameSource = frameSource
+        super.init()
+    }
+
+    nonisolated func captureOutput(
         _ output: AVCaptureOutput,
         didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
         frameIndex += 1
-        guard frameIndex % 8 == 0,
-              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+            return
+        }
+
+        frameSource.update(pixelBuffer: pixelBuffer)
+
+        guard frameIndex % 8 == 0 else {
             return
         }
 

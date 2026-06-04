@@ -60,7 +60,7 @@ final class PhotoHistoryStore: ObservableObject {
     private let ioQueue = DispatchQueue(label: "filab.history.io", qos: .userInitiated)
 
     // FIX 4: saveRecords 防抖 — 避免连续多次操作时重复序列化
-    private var saveWorkItem: DispatchWorkItem?
+    nonisolated(unsafe) private var saveWorkItem: DispatchWorkItem?
 
     init() {
         documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
@@ -98,8 +98,8 @@ final class PhotoHistoryStore: ObservableObject {
 
     // MARK: - Image Storage
 
-    // FIX 1: 同步版本仅供内部 ioQueue 调用
-    private func saveImageSync(_ image: UIImage, withName name: String) -> Bool {
+    // FIX 1: 同步版本仅供内部 ioQueue 调用（nonisolated 使其可从 Sendable 闭包调用）
+    nonisolated private func saveImageSync(_ image: UIImage, withName name: String) -> Bool {
         let fileURL = documentsDirectory.appendingPathComponent(name)
         guard let data = image.jpegData(compressionQuality: 0.9) else { return false }
         do {
@@ -312,15 +312,15 @@ final class PhotoHistoryStore: ObservableObject {
         return sortedKeys.map { (date: $0, records: groups[$0]!) }
     }
 
-    // MARK: - Private Helpers (ioQueue 内调用)
+    // MARK: - Private Helpers (ioQueue 内调用，nonisolated 使其可从 Sendable 闭包调用)
 
-    private func deleteImageSync(named name: String) {
+    nonisolated private func deleteImageSync(named name: String) {
         let fileURL = documentsDirectory.appendingPathComponent(name)
         try? FileManager.default.removeItem(at: fileURL)
     }
 
     // FIX 3: 用 UIGraphicsImageRenderer 替换废弃的 UIGraphicsBeginImageContextWithOptions
-    private func generateThumbnailSync(from image: UIImage, size: CGFloat = 300) -> UIImage {
+    nonisolated private func generateThumbnailSync(from image: UIImage, size: CGFloat = 300) -> UIImage {
         let scale = min(size / image.size.width, size / image.size.height)
         let newSize = CGSize(
             width:  (image.size.width  * scale).rounded(),

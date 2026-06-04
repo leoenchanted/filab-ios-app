@@ -4,7 +4,7 @@ import simd
 
 // MARK: - Film Preset Models
 
-struct FilmPreset: Identifiable, Codable, Equatable {
+struct FilmPreset: Identifiable, Codable, Equatable, Sendable {
     let id: String
     let name: String
     let description: String
@@ -58,7 +58,7 @@ struct FilmPreset: Identifiable, Codable, Equatable {
     }
 }
 
-enum FilmCategory: String, Codable, CaseIterable {
+enum FilmCategory: String, Codable, CaseIterable, Sendable {
     case kodak = "Kodak"
     case fuji = "Fuji"
     case fujiDigital = "Fuji X"      // 新增：富士数字机型模拟
@@ -74,14 +74,14 @@ enum FilmCategory: String, Codable, CaseIterable {
 
 // MARK: - White Balance
 
-struct WhiteBalance: Codable, Equatable {
+struct WhiteBalance: Codable, Equatable, Sendable {
     var temperature: Double  // -1 to 1, where -1 is cooler (blue), 1 is warmer (orange)
     var tint: Double         // -1 to 1, where -1 is greener, 1 is more magenta
 
     static let neutral = WhiteBalance(temperature: 0, tint: 0)
 
     // Convert to RGB multipliers for shader
-    func toRGB() -> SIMD3<Float> {
+    nonisolated func toRGB() -> SIMD3<Float> {
         let temp = Float(temperature)
         let tintValue = Float(tint)
         
@@ -111,7 +111,7 @@ struct WhiteBalance: Codable, Equatable {
 
 // MARK: - Color Matrix (3x3)
 
-struct ColorMatrix: Codable, Equatable {
+struct ColorMatrix: Codable, Equatable, Sendable {
     // Row-major 3x3 matrix: [r1, g1, b1, r2, g2, b2, r3, g3, b3]
     // Where row 1 affects red output, row 2 affects green, row 3 affects blue
     var values: [Double]
@@ -157,7 +157,7 @@ struct ColorMatrix: Codable, Equatable {
         0.02,  0.10,   0.87
     ])
 
-    func toSIMD() -> float3x3 {
+    nonisolated func toSIMD() -> float3x3 {
         // simd matrices are column-major. Preset values are stored row-major so
         // transpose here to keep Metal output aligned with the Core Image path.
         return float3x3(
@@ -170,7 +170,7 @@ struct ColorMatrix: Codable, Equatable {
 
 // MARK: - Tone Curve
 
-struct ToneCurve: Codable, Equatable {
+struct ToneCurve: Codable, Equatable, Sendable {
     var points: [[Double]]
 
     // ==================== 优化版曲线（全部基于你的 shader 线性插值特性） ====================
@@ -387,7 +387,7 @@ struct GrainConfig: Codable, Equatable {
 
 // MARK: - Adjustment Parameters
 
-struct AdjustmentParams: Equatable, Codable {
+struct AdjustmentParams: Equatable, Codable, Sendable {
     var opacity: Double = 100       // 0-100, film effect strength
     var exposure: Double = 0        // -50 to 50
     var contrast: Double = 0        // -50 to 50

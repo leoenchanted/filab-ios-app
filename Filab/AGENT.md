@@ -24,7 +24,7 @@ Filab 是一个 iOS SwiftUI 照片胶片模拟应用。它把照片导入、胶�
 
 主入口分类：
 
-- `相机`：页面层使用系统原生 `TabView(selection:)` 管理相册 / 设置两个页面，但不要给页面添加 `.tabItem`，否则 iOS 26 会生成第二条系统浮动 tabbar。这个 `TabView` 应使用 `.tabViewStyle(.page(indexDisplayMode: .never))`，只保留页面容器和 selection 能力。底部唯一可见入口是覆盖在 `TabView` 上方的 `MainBottomDock`，视觉参考 iOS 26 电话 App：左侧一个胶囊 tab group，当前 tab 在内部显示灰色选中 pill，右侧是独立圆形相机主按钮。这个 dock 里的左侧 tab bar 和右侧相机按钮必须放在同一个 SwiftUI `GlassEffectContainer` 内，分别使用系统原生 `glassEffect(.regular, ...)` / `glassEffect(.regular.interactive(true), ...)` 和稳定的 `glassEffectID`，这样相机按钮按压靠近时才能获得系统原生 Liquid Glass metaball / morphing 融合；不要用自绘毛玻璃或长期相连的形状模拟。相机使用 AVFoundation 接入系统相机，支持权限请求、前后摄切换、系统级变焦、点按对焦/测光、EV、WB、格式/画幅入口、胶片实时轻量预览。相机横竖屏方向必须使用 `AVCaptureDevice.RotationCoordinator` 分别驱动预览层 and 照片输出的 `videoRotationAngle`，不要手动读取陀螺仪或固定 portrait；JPEG / HEIF 拍照后会把当前胶片烘焙进照片并直接写入系统相册；RAW 拍照会保存真正的 DNG 原始文件，不应用胶片效果。未来完整逐帧 Metal 胶片预览从这里继续扩展。
+- `相机`：页面层使用系统原生 `TabView(selection:)` 管理相册 / 设置两个页面，但不要给页面添加 `.tabItem`，否则 iOS 26 会生成第二条系统浮动 tabbar。这个 `TabView` 应使用 `.tabViewStyle(.page(indexDisplayMode: .never))`，只保留页面容器和 selection 能力。底部唯一可见入口是覆盖在 `TabView` 上方的 `MainBottomDock`，视觉参考 iOS 26 电话 App：左侧一个胶囊 tab group，当前 tab 在内部显示灰色选中 pill，右侧是独立圆形相机主按钮。这个 dock 里的左侧 tab bar 和右侧相机按钮必须放在同一个 SwiftUI `GlassEffectContainer` 内，分别使用系统原生 `glassEffect(.regular, ...)` / `glassEffect(.regular.interactive(true), ...)` 和稳定的 `glassEffectID`，这样相机按钮按压靠近时才能获得系统原生 Liquid Glass metaball / morphing 融合；不要用自绘毛玻璃或长期相连的形状模拟。相机使用 AVFoundation 接入系统相机，支持权限请求、前后摄切换、系统级变焦、点按对焦/测光、EV、WB、格式/画幅入口和胶片实时 Metal 预览。胶片模式取景器使用 `AVCaptureVideoDataOutput` + `CVMetalTextureCache` + `MTKView`，不再把 SwiftUI `.colorEffect()` 直接套到 `AVCaptureVideoPreviewLayer` 上；RAW / 无胶片模式仍使用系统 `AVCaptureVideoPreviewLayer`。相机横竖屏方向必须拆成两条：实时取景器保持稳定取景方向，不随横竖屏旋转；照片输出用 `AVCaptureDevice.RotationCoordinator.videoRotationAngleForHorizonLevelCapture` 更新 `AVCapturePhotoOutput` 的 `videoRotationAngle`，不要把同一个 capture angle 套到 `AVCaptureVideoDataOutput` 上。JPEG / HEIF 拍照后会把当前胶片烘焙进照片并直接写入系统相册；RAW 拍照会保存真正的 DNG 原始文件，不应用胶片效果。
 - `相册`：照片导入、本地编辑历史、搜索筛选和批量管理。
 - `设置`：外观、导出、保存和缓存等全局设置。
 
@@ -32,11 +32,12 @@ Filab 是一个 iOS SwiftUI 照片胶片模拟应用。它把照片导入、胶�
 
 - `App/FilabApp.swift`：App 入口。
 - `App/ContentView.swift`：App 外壳、底部 Liquid Glass dock、右侧圆形相机主按钮、全屏相机和编辑器展示。编辑器 `onDismiss` 必须遵守固定顺序：①快照取出数据 → ②立即清空 ViewModel 全部 `@Published` 状态 → ③调用 `PhotoHistoryStore` 异步存盘接口；禁止在 `onDismiss` 内做任何同步磁盘 IO（详见线程与性能约定）。
-- `Features/Camera/CameraView.swift`：全屏相机页 SwiftUI 界面、权限状态展示、专业相机风格读数条、左侧每页 5 个工具的分页工具栏、直方图、1x/2x 快捷变焦、捏合变焦、点按对焦反馈、ISO / 快门 / EV / WB / 胶片两层选择调节区、格式和画幅当前值显示、快门和自拍入口。
-- `Features/Camera/CameraController.swift`：AVFoundation 系统相机权限、Session 配置、前后摄切换、设备级变焦、点按对焦/测光、EV、WB、照片格式 and 拍照回调。内部维护专用 `sessionQueue = DispatchQueue(label: "filab.camera.session")`，所有 `session.startRunning` / `stopRunning` / `beginConfiguration` / `commitConfiguration` 均在此队列执行，不可在 `@MainActor` 主线程直接调用。拍摄 JPEG / HEIF 时必须通过当前 active format 的 `supportedMaxPhotoDimensions` 选择最高照片尺寸，并同时设置 `AVCapturePhotoOutput.maxPhotoDimensions` 和每次 `AVCapturePhotoSettings.maxPhotoDimensions`；不要恢复到默认 settings，否则系统会倾向使用较小尺寸。纯 RAW 格式不设置 `photoQualityPrioritization`（详见线程与性能约定）。
-- `Features/Camera/CameraOptions.swift`：相机页专用枚举和预览 helper，包含画幅、拍摄格式、专业控制面板分类，以及基于 `FilmPreset` 的轻量实时预览参数。
+- `Features/Camera/CameraView.swift`：全屏相机页 SwiftUI 界面、权限状态展示、专业相机风格读数条、左侧每页 5 个工具的分页工具栏、直方图、1x/2x 快捷变焦、捏合变焦、点按对焦反馈、ISO / 快门 / EV / WB / 胶片两层选择调节区、格式和画幅当前值显示、快门和自拍入口。胶片模式取景器入口在这里切到 `MetalCameraPreviewView`；RAW / 无胶片模式切回 `CameraPreviewView`。
+- `Features/Camera/CameraController.swift`：AVFoundation 系统相机权限、Session 配置、前后摄切换、设备级变焦、点按对焦/测光、EV、WB、照片格式、实时视频帧分发 and 拍照回调。内部维护专用 `sessionQueue = DispatchQueue(label: "filab.camera.session")`，所有 `session.startRunning` / `stopRunning` / `beginConfiguration` / `commitConfiguration` 均在此队列执行，不可在 `@MainActor` 主线程直接调用。拍摄 JPEG / HEIF 时必须通过当前 active format 的 `supportedMaxPhotoDimensions` 选择最高照片尺寸，并同时设置 `AVCapturePhotoOutput.maxPhotoDimensions` 和每次 `AVCapturePhotoSettings.maxPhotoDimensions`；不要恢复到默认 settings，否则系统会倾向使用较小尺寸。纯 RAW 格式不设置 `photoQualityPrioritization`（详见线程与性能约定）。`AVCaptureVideoDataOutput` 同时服务直方图和 Metal 取景器帧源，不要再额外添加第二路 video data output。
+- `Features/Camera/CameraOptions.swift`：相机页专用枚举和预览 helper，包含画幅、拍摄格式、专业控制面板分类，以及基于 `FilmPreset` 的 Metal 预览参数（白平衡、色彩矩阵、曲线点等）。
 - `Features/Camera/CameraPhotoLibrarySaver.swift`：相机拍摄后的系统相册写入，负责 JPEG / HEIF 编码、RAW DNG 临时文件导入 and Photos add-only 权限请求。
-- `Features/Camera/CameraPreviewView.swift`：`AVCaptureVideoPreviewLayer` 的 SwiftUI 桥接，负责真实取景器预览和自拍镜像。
+- `Features/Camera/CameraPreviewView.swift`：`AVCaptureVideoPreviewLayer` 的 SwiftUI 桥接。现在只用于 RAW / 无胶片模式或系统 preview fallback；胶片模式不要再在它上面叠 `.colorEffect()`。
+- `Features/Camera/MetalCameraPreviewView.swift`：胶片模式实时 Metal 取景器。内部用 `MTKView`、`CVMetalTextureCacheCreateTextureFromImage` 把 `AVCaptureVideoDataOutput` 的 Y / CbCr plane 包成 Metal textures，并用 `PreviewCore.metal` 的 camera preview shader 渲染胶片色彩。
 - `Features/Library/HomeView.swift`：相册 / 历史记录 / 搜索筛选 / 批量管理界面。
 - `Features/Library/PhotoPicker.swift`：相册导入桥接，供相册入口 and 相机入口复用。
 - `Features/Editor/EditorView.swift`：照片编辑器，包含 FILM / ADJUST 两个 tab。
@@ -51,7 +52,7 @@ Filab 是一个 iOS SwiftUI 照片胶片模拟应用。它把照片导入、胶�
 - `Core/Film/FilmPresetCatalog.swift`：内置胶片预设目录。
 - `Core/History/PhotoHistoryStore.swift`：本地编辑记录和图片文件存储。`addRecord` / `updateRecord` 为异步接口，接受可选 `completion` 回调；所有磁盘 IO 在内部 `ioQueue`（`DispatchQueue(label: "filab.history.io", qos: .userInitiated)`）执行，完成后回到主线程更新 `records`。缩略图生成使用 `UIGraphicsImageRenderer`，已废弃的 `UIGraphicsBeginImageContextWithOptions` 不可使用。`DateFormatter` 用 `static let` 缓存，不要在 computed property 里每次新建（详见线程与性能约定）。
 - `Core/Rendering/MetalFilmProcessor.swift`：Metal 纹理创建和图像处理管线。
-- `Core/Rendering/Shaders/`：Metal shader，包含 Film pass、Adjust pass、颗粒、bloom、halation and 共享 helper。
+- `Core/Rendering/Shaders/`：Metal shader，包含 Film pass、Adjust pass、颗粒、bloom、halation、相机实时预览 shader and 共享 helper。`PreviewCore.metal` 同时包含 SwiftUI stitchable 预览核心和 `MTKView` 相机预览 pipeline。
 - `Core/Appearance/ColorSchemeManager.swift`：手动深色 / 浅色模式管理。
 
 ## 渲染模型
@@ -105,6 +106,25 @@ Filab 是一个 iOS SwiftUI 照片胶片模拟应用。它把照片导入、胶�
 - `ColorMatrix.toSIMD()` 会故意转置矩阵后再传给 Metal。
 - 不要随便删除这个转置，除非你同时改掉所有预设矩阵的数据存储方式。
 
+### 相机实时 Metal 预览
+
+胶片模式相机预览现在不是 SwiftUI modifiers，也不是 `.colorEffect()` 叠在 `AVCaptureVideoPreviewLayer` 上。
+
+当前链路：
+
+1. `CameraController` 配置一条 `AVCaptureVideoDataOutput`，pixel format 为 `kCVPixelFormatType_420YpCbCr8BiPlanarFullRange`，并设置 `kCVPixelBufferMetalCompatibilityKey = true`。
+2. `CameraHistogramSampler` 在同一个 sampleBuffer 回调里先把 `CVPixelBuffer` 写入 `CameraPreviewFrameSource`，再每 8 帧更新一次直方图。
+3. `MetalCameraPreviewView` 的 `MTKView` 从 `CameraPreviewFrameSource` 拉取最新帧。
+4. `MetalCameraPreviewRenderer` 用 `CVMetalTextureCacheCreateTextureFromImage` 分别创建 Y plane 的 `.r8Unorm` texture 和 CbCr plane 的 `.rg8Unorm` texture。
+5. `PreviewCore.metal` 的 `cameraPreviewFragment` 执行 `YUV -> RGB -> Linear -> WB -> Matrix -> Curve LUT -> Contrast(0.18) -> Saturation -> Fade -> sRGB`。
+
+性能约定：
+
+- 实时预览只做影调和色彩，不做 grain / halation / bloom / sharpen。
+- 主曲线在 Swift 侧为每个 preset 预生成 256 像素 1D LUT texture，shader 中只采样 LUT，不要在每个像素里循环曲线控制点。
+- `CVMetalTexture` 引用生命周期必须覆盖 command buffer 执行期；`MetalCameraPreviewRenderer` 通过 command buffer completion 捕获 textures，避免偶发黑帧或闪屏。
+- 不要再给胶片模式取景器接回 `AVCaptureVideoPreviewLayer + SwiftUI .colorEffect()`；这会导致离屏渲染、黑屏或严重掉帧。
+
 ## 线程与性能约定
 
 这是本项目最容易出现卡死 / Watchdog 超时的区域，后续 Agent 修改时必须严格遵守。
@@ -114,6 +134,17 @@ Filab 是一个 iOS SwiftUI 照片胶片模拟应用。它把照片导入、胶�
 - `session.startRunning()` 和 `session.stopRunning()` 是同步阻塞调用，Apple 文档明确要求放到后台线程。Bayer RAW / ProRAW 的 session 配置比普通 JPEG 更重，在主线程调用极易触发明显卡顿或 Watchdog 超时杀死进程。
 - `CameraController` 内部维护专用 `sessionQueue = DispatchQueue(label: "filab.camera.session")`，所有 session 操作（`startRunning` / `stopRunning` / `beginConfiguration` / `commitConfiguration` / `applyCamera`）必须在此队列执行，`@Published` 属性更新通过 `DispatchQueue.main.async` 回写主线程。
 - `switchCamera()` 的 session 配置同样在 `sessionQueue` 执行，不要在 `@MainActor` 方法里直接调用。
+- `AVCaptureVideoDataOutput.deliversPreviewSizedOutputBuffers = true` 前必须先设置 `automaticallyConfiguresOutputBufferDimensions = false`，否则运行时会抛 `May not be set unless automaticallyConfiguresOutputBufferDimensions has been set to NO` 异常。
+- `AVCaptureVideoDataOutput` 已经被相机页用于 Metal 预览和直方图，不要为同一 session 添加第二个 video data output；需要新增帧消费者时，从 `CameraPreviewFrameSource` 或现有 delegate 扩展。
+
+### 相机方向（CameraController / MetalCameraPreviewView）
+
+- 预览方向和拍照方向是两条独立路径。
+- 胶片模式实时取景器的 `AVCaptureVideoDataOutput` 保持稳定取景方向，不随设备横竖屏旋转；横屏/竖屏切换时取景画面应该保持构图不变。
+- 拍照方向使用 `AVCaptureDevice.RotationCoordinator.videoRotationAngleForHorizonLevelCapture` 更新 `captureRotationAngle`，只在 `capturePhoto()` 时设置到 `AVCapturePhotoOutput` 的 video connection。
+- 不要把 capture angle 同时套到 `AVCaptureVideoDataOutput`，否则取景器会横竖屏跟着旋转/重裁切，用户构图会漂。
+- 前摄镜像只在 Metal shader / preview 展示层处理；不要让 `AVCaptureVideoDataOutput.connection.isVideoMirrored` 和 shader 同时镜像，避免双重翻转。
+- RAW / 无胶片模式仍使用 `AVCaptureVideoPreviewLayer`，其预览方向由 `CameraPreviewView` 内部的 `RotationCoordinator` 处理；胶片模式使用 Metal 预览，不依赖 preview layer。
 
 ### RAW 拍照设置（CameraController）
 
@@ -163,6 +194,7 @@ Filab 是一个 iOS SwiftUI 照片胶片模拟应用。它把照片导入、胶�
 - 当前编辑记录通过 `UserDefaults` 加 Documents 里的 JPEG 文件保存。早期可以用，但如果相册系统继续扩大，建议迁移到 SwiftData 或其他数据库。
 - `PhotoHistoryStore.saveRecords()` 把整个记录数组序列化进 `UserDefaults`；记录数量较大时单次序列化体积会增长，未来应考虑分页存储或迁移到数据库。
 - Bayer RAW / ProRAW 拍照时 session 配置比 JPEG 明显更重，启动耗时更长；若未来出现 RAW 模式切换卡顿，应优先检查 `sessionQueue` 里是否有阻塞操作或配置冲突。
+- 相机实时 Metal 预览已在真机上能出画面且色彩接近胶片模拟，但不同机型、前摄镜像、横竖屏拍照方向和点按对焦坐标仍要继续真机回归。
 
 ## 构建和验证
 
@@ -183,7 +215,7 @@ xcodebuild -project ../Filab.xcodeproj -scheme Filab -configuration Debug -sdk i
 - 相机页视觉参考专业胶片相机界面：顶部格式和画幅按钮必须直接显示当前值（例如 JPG、RAW、3:4），左侧取景器工具栏每页固定 5 个工具并保持等距，底部功能调节区用于切换 ISO、快门、EV、WB 和胶片。胶片调节区必须分两层：上面是全部 / 品牌分类，下面是具体 `FilmPreset` 胶片，不要把品牌 and 胶片混在同一条横向列表里。
 - 相机拍照后不要进入编辑器。JPEG / HEIF 会用临时 `FilmEditorViewModel` 调用现有胶片渲染能力，把当前 `FilmPreset` 烘焙到照片里，再用 `PHAssetCreationRequest` 保存到系统相册。
 - RAW 模式必须走 `AVCapturePhotoSettings(rawPixelFormatType:rawFileType:processedFormat:processedFileType:)` 的 RAW-only DNG 捕获；不要把 RAW 转成 `UIImage`，也不要应用胶片预设。RAW settings 不要设置 `photoQualityPrioritization`，AVFoundation 会因此抛 `Unsupported when capturing RAW` 异常。RAW 模式 UI 需要提示“保存 DNG 原始文件，不应用胶片效果”。
-- 相机实时胶片预览直接使用 `FilmPreset.allPresets` 和 `FilmCategory` 分类，不再维护单独的相机胶片列表。当前预览是 SwiftUI/GPU 合成的轻量预览层，用 saturation、contrast、soft-light overlay 和暗角模拟大方向，保持取景流畅；它不是最终照片编辑器的完整 Metal shader 管线。下一阶段如果要做严肃所见即所得，应按 Apple `AVCamFilter` 思路使用 `AVCaptureVideoDataOutput` 获取帧，再用 Core Image / Metal 复用现有胶片参数，且预览帧率应节流到 24-30fps、降分辨率处理，拍照仍走 `AVCapturePhotoOutput` 高质量静态图。
+- 相机实时胶片预览直接使用 `FilmPreset.allPresets` 和 `FilmCategory` 分类，不再维护单独的相机胶片列表。胶片模式取景器走 `AVCaptureVideoDataOutput` + `MTKView` + Metal shader，复用 `FilmPreset` 的白平衡、色彩矩阵、主曲线、对比度、饱和度和 fade。预览只做影调色彩，不做 grain / halation / bloom / sharpen；拍照仍走 `AVCapturePhotoOutput` 高质量静态图并在保存时用现有导出管线烘焙完整效果。
 - 首页相册支持按胶片预设筛选、按胶片名/日期/尺寸搜索、选择模式 and 批量删除。
 - 深色 / 浅色模式都要检查文字对比度。
 - 编辑器主体视觉上是深色，所以深色面板里不要随便用 `.primary`，除非背景也会跟随主题变化。
