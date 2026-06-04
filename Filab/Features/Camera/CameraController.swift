@@ -1,5 +1,7 @@
 @preconcurrency import AVFoundation
 import Combine
+@preconcurrency import CoreLocation
+import ImageIO
 import UIKit
 
 struct CameraCaptureResult {
@@ -7,9 +9,22 @@ struct CameraCaptureResult {
     let processedImage: UIImage?
     let processedData: Data?
     let rawData: Data?
+    let metadata: [String: Any]
+    let location: CLLocation?
+    let capturedAt: Date
+    let requestedDimensions: CMVideoDimensions?
+    let resolvedDimensions: CMVideoDimensions?
 
     var isRaw: Bool {
         format.isRaw && rawData != nil
+    }
+
+    var resolutionDisplay: String {
+        CameraPhotoResolution.title(for: resolvedDimensions)
+    }
+
+    var pixelDisplay: String {
+        CameraPhotoResolution.pixelDisplay(for: resolvedDimensions)
     }
 }
 
@@ -47,10 +62,23 @@ final class CameraController: NSObject, ObservableObject {
     @Published private(set) var isAppleProRAWCaptureAvailable = false
     @Published private(set) var isBayerRawCaptureAvailable = false
     @Published private(set) var histogramBins = CameraHistogramSampler.placeholderBins
+    @Published private(set) var photoResolutionOptions: [CameraPhotoResolutionOption] = []
+    @Published private(set) var availablePhotoResolutions: [CameraPhotoResolution] = []
+    @Published private(set) var selectedPhotoResolution: CameraPhotoResolution?
     @Published private(set) var maxPhotoDimensionsDisplay = "--MP"
+    @Published private(set) var photoResolutionDetail = "设备默认"
+    @Published private(set) var locationCaptureStatus = "定位关闭"
+    @Published private(set) var isManualExposureSettling = false
+    @Published private(set) var rawPreviewExposureBiasEV: Float = 0
     @Published var selectedFilmPreset: FilmPreset? = FilmPreset.preset(withId: "portra400")
     @Published var aspectRatio: CameraAspectRatio = .threeFour
-    @Published var captureFormat: CameraCaptureFormat = .jpeg
+    @Published var captureFormat: CameraCaptureFormat = .jpeg {
+        didSet {
+            guard captureFormat != oldValue else { return }
+            refreshPhotoResolutionStateForCurrentFormat()
+            refreshRawPreviewExposureBias()
+        }
+    }
     @Published private var errorMessage: String?
 
     nonisolated(unsafe) private let photoOutput = AVCapturePhotoOutput()
@@ -58,6 +86,7 @@ final class CameraController: NSObject, ObservableObject {
     // FIX 1: 专用 session 队列，session 的阻塞操作全部在此队列执行，避免卡主线程
     private let sessionQueue = DispatchQueue(label: "filab.camera.session")
     private let videoDataOutputQueue = DispatchQueue(label: "filab.camera.video")
+    private let locationManager = CLLocationManager()
     private let histogramSampler: CameraHistogramSampler
     nonisolated(unsafe) private var videoInput: AVCaptureDeviceInput?
     nonisolated(unsafe) private var photoCaptureDelegate: PhotoCaptureDelegate?
@@ -66,6 +95,13 @@ final class CameraController: NSObject, ObservableObject {
     private var pinchBaseZoomFactor: CGFloat = 1
     nonisolated(unsafe) private var captureRotationAngle: CGFloat = 0
     nonisolated(unsafe) private var configuredMaxPhotoDimensions: CMVideoDimensions?
+    nonisolated(unsafe) private var selectedMaxPhotoDimensions: CMVideoDimensions?
+    private var allPhotoResolutions: [CameraPhotoResolution] = []
+    private var lastResolvedRawDimensionsByFormat: [CameraCaptureFormat: CMVideoDimensions] = [:]
+    private var learnedRawPreviewExposureBiasByFormat: [CameraCaptureFormat: Float] = [:]
+    private var manualExposureRevision = 0
+    private var manualExposureRequestDate: Date?
+    private var lastKnownLocation: CLLocation?
 
     var isAuthorized: Bool {
         authorizationStatus == .authorized
@@ -92,6 +128,9 @@ final class CameraController: NSObject, ObservableObject {
     override init() {
         histogramSampler = CameraHistogramSampler(frameSource: previewFrameSource)
         super.init()
+        locationManager.delegate = self
+        locationManager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+        locationManager.distanceFilter = 50
         histogramSampler.onHistogram = { [weak self] bins in
             Task { @MainActor in
                 self?.histogramBins = bins
@@ -131,6 +170,10 @@ final class CameraController: NSObject, ObservableObject {
 
     var whiteBalanceDisplay: String {
         isWhiteBalanceLocked ? "\(Int(whiteBalanceTemperature))K" : "AUTO"
+    }
+
+    var selectedPhotoResolutionDisplay: String {
+        selectedPhotoResolution?.title ?? maxPhotoDimensionsDisplay
     }
 
     var statusText: String {
@@ -179,6 +222,7 @@ final class CameraController: NSObject, ObservableObject {
     // FIX 1: startRunning/stopRunning 移到 sessionQueue，不再阻塞主线程
     func start() {
         authorizationStatus = AVCaptureDevice.authorizationStatus(for: .video)
+        prepareLocationCapture()
 
         switch authorizationStatus {
         case .authorized:
@@ -254,6 +298,22 @@ final class CameraController: NSObject, ObservableObject {
 
             self.session.commitConfiguration()
         }
+    }
+
+    func setPhotoResolution(_ resolution: CameraPhotoResolution) {
+        if let option = photoResolutionOptions.first(where: { $0.resolution == resolution }),
+           !option.isAvailable {
+            errorMessage = option.unavailableReason
+            return
+        }
+
+        guard availablePhotoResolutions.contains(resolution) else { return }
+
+        selectedPhotoResolution = resolution
+        selectedMaxPhotoDimensions = resolution.dimensions
+        maxPhotoDimensionsDisplay = resolution.title
+        photoResolutionDetail = resolution.detail
+        errorMessage = nil
     }
 
     func setZoomFactor(_ factor: CGFloat) {
@@ -424,7 +484,17 @@ final class CameraController: NSObject, ObservableObject {
     func capturePhoto(completion: @escaping (Result<CameraCaptureResult, Error>) -> Void) {
         guard canCapture else { return }
 
+        if shouldDelayRawCaptureForExposureSettling {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { [weak self] in
+                self?.capturePhoto(completion: completion)
+            }
+            return
+        }
+
         isCapturing = true
+        let capturedAt = Date()
+        let captureLocation = currentLocationForCapture()
+        let requestedDimensions = selectedMaxPhotoDimensions
 
         let settings: AVCapturePhotoSettings
 
@@ -452,7 +522,12 @@ final class CameraController: NSObject, ObservableObject {
             }
         }
 
-        let delegate = PhotoCaptureDelegate(expectedFormat: captureFormat) { [weak self] result in
+        let delegate = PhotoCaptureDelegate(
+            expectedFormat: captureFormat,
+            capturedAt: capturedAt,
+            location: captureLocation,
+            requestedDimensions: requestedDimensions
+        ) { [weak self] result in
             Task { @MainActor in
                 guard let self else { return }
 
@@ -460,7 +535,8 @@ final class CameraController: NSObject, ObservableObject {
                 self.photoCaptureDelegate = nil
 
                 switch result {
-                case .success:
+                case .success(let capture):
+                    self.handleResolvedCapture(capture)
                     self.errorMessage = nil
                     completion(result)
                 case .failure(let error):
@@ -590,22 +666,28 @@ final class CameraController: NSObject, ObservableObject {
         let wbTemp = min(max(wbValues.temperature, 2500), 9000)
         let wbTint = min(max(wbValues.tint, -100), 100)
         let wbLocked = device.whiteBalanceMode == .locked
-        let bestDimensions = Self.bestPhotoDimensions(for: device.activeFormat)
-        let photoDimensionsDisplay = Self.photoDimensionsDisplay(bestDimensions)
+        let photoResolutions = Self.photoResolutions(for: device.activeFormat)
+        let outputMaxDimensions = photoResolutions.first?.dimensions
+        let selectedResolution = Self.preferredPhotoResolution(
+            from: photoResolutions,
+            preserving: selectedMaxPhotoDimensions
+        )
 
         // 设置初始 zoom
         try? device.lockForConfiguration()
         device.videoZoomFactor = initialZoom
         device.unlockForConfiguration()
 
-        configuredMaxPhotoDimensions = bestDimensions
+        configuredMaxPhotoDimensions = outputMaxDimensions
+        selectedMaxPhotoDimensions = selectedResolution?.dimensions ?? outputMaxDimensions
         if session.outputs.contains(photoOutput) {
             configureMaximumPhotoDimensionsForCurrentFormat()
         }
 
-        if let bestDimensions {
+        if let outputMaxDimensions {
             print("Filab camera device: \(device.localizedName)")
-            print("Filab camera max photo dimensions: \(bestDimensions.width)x\(bestDimensions.height) (\(photoDimensionsDisplay))")
+            print("Filab camera max photo dimensions: \(outputMaxDimensions.width)x\(outputMaxDimensions.height)")
+            print("Filab camera supported photo dimensions: \(photoResolutions.map { $0.detail }.joined(separator: ", "))")
         }
 
         // videoInput 可直接设置（nonisolated(unsafe)），@Published 属性通过 DispatchQueue.main.async 回主线程
@@ -637,7 +719,8 @@ final class CameraController: NSObject, ObservableObject {
             self.whiteBalanceTemperature = wbTemp
             self.whiteBalanceTint = wbTint
             self.isWhiteBalanceLocked = wbLocked
-            self.maxPhotoDimensionsDisplay = photoDimensionsDisplay
+            self.allPhotoResolutions = photoResolutions
+            self.refreshPhotoResolutionStateForCurrentFormat()
         }
     }
 
@@ -746,6 +829,111 @@ final class CameraController: NSObject, ObservableObject {
         }
     }
 
+    private var shouldDelayRawCaptureForExposureSettling: Bool {
+        guard captureFormat.isRaw, isManualExposure, isManualExposureSettling else {
+            return false
+        }
+
+        let settlingAge = manualExposureRequestDate.map { Date().timeIntervalSince($0) } ?? 1
+        return settlingAge < 0.75
+    }
+
+    private func refreshPhotoResolutionStateForCurrentFormat() {
+        guard !allPhotoResolutions.isEmpty else {
+            photoResolutionOptions = []
+            availablePhotoResolutions = []
+            selectedPhotoResolution = nil
+            selectedMaxPhotoDimensions = nil
+            maxPhotoDimensionsDisplay = Self.photoDimensionsDisplay(configuredMaxPhotoDimensions)
+            photoResolutionDetail = CameraPhotoResolution.pixelDisplay(for: configuredMaxPhotoDimensions)
+            return
+        }
+
+        let options = Self.photoResolutionOptions(
+            for: captureFormat,
+            all: allPhotoResolutions,
+            observedRawDimensions: lastResolvedRawDimensionsByFormat[captureFormat]
+        )
+        let enabledResolutions = options.filter(\.isAvailable).map(\.resolution)
+        let selectedResolution = Self.preferredPhotoResolution(
+            from: enabledResolutions,
+            preserving: selectedMaxPhotoDimensions
+        )
+
+        photoResolutionOptions = options
+        availablePhotoResolutions = enabledResolutions
+        selectedPhotoResolution = selectedResolution
+        selectedMaxPhotoDimensions = selectedResolution?.dimensions
+        maxPhotoDimensionsDisplay = selectedResolution?.title ?? Self.photoDimensionsDisplay(configuredMaxPhotoDimensions)
+        photoResolutionDetail = selectedResolution?.detail ?? CameraPhotoResolution.pixelDisplay(for: configuredMaxPhotoDimensions)
+    }
+
+    private func handleResolvedCapture(_ capture: CameraCaptureResult) {
+        guard capture.format.isRaw else {
+            return
+        }
+
+        if let baselineExposure = Self.dngBaselineExposureEV(from: capture.metadata) {
+            learnedRawPreviewExposureBiasByFormat[capture.format] = baselineExposure
+
+            if capture.format == captureFormat {
+                refreshRawPreviewExposureBias()
+            }
+        }
+
+        guard let requestedDimensions = capture.requestedDimensions,
+              let resolvedDimensions = capture.resolvedDimensions,
+              Self.photoArea(requestedDimensions) > Self.photoArea(resolvedDimensions) else {
+            return
+        }
+
+        lastResolvedRawDimensionsByFormat[capture.format] = resolvedDimensions
+        if capture.format == captureFormat {
+            refreshPhotoResolutionStateForCurrentFormat()
+        }
+    }
+
+    private func refreshRawPreviewExposureBias() {
+        guard captureFormat.isRaw else {
+            rawPreviewExposureBiasEV = 0
+            return
+        }
+
+        rawPreviewExposureBiasEV = learnedRawPreviewExposureBiasByFormat[captureFormat]
+            ?? Self.defaultRawPreviewExposureBiasEV(for: captureFormat)
+    }
+
+    private func prepareLocationCapture() {
+        switch locationManager.authorizationStatus {
+        case .notDetermined:
+            locationCaptureStatus = "请求定位"
+            locationManager.requestWhenInUseAuthorization()
+        case .authorizedAlways, .authorizedWhenInUse:
+            locationCaptureStatus = "定位开启"
+            locationManager.startUpdatingLocation()
+        case .denied, .restricted:
+            locationCaptureStatus = "定位关闭"
+        @unknown default:
+            locationCaptureStatus = "定位不可用"
+        }
+    }
+
+    private func currentLocationForCapture() -> CLLocation? {
+        prepareLocationCapture()
+
+        guard let lastKnownLocation,
+              lastKnownLocation.horizontalAccuracy >= 0,
+              abs(lastKnownLocation.timestamp.timeIntervalSinceNow) < 600 else {
+            if locationManager.authorizationStatus == .authorizedWhenInUse ||
+                locationManager.authorizationStatus == .authorizedAlways {
+                locationManager.requestLocation()
+            }
+            return nil
+        }
+
+        return lastKnownLocation
+    }
+
     private func makePhotoSettings() throws -> AVCapturePhotoSettings {
         if captureFormat.isRaw {
             let query: (OSType) -> Bool
@@ -764,21 +952,27 @@ final class CameraController: NSObject, ObservableObject {
             }
 
             // FIX 2: 纯 RAW 不附加 processedFormat，避免不必要的双路输出带来的 pipeline 压力
-            return AVCapturePhotoSettings(
+            let settings = AVCapturePhotoSettings(
                 rawPixelFormatType: rawFormat,
                 rawFileType: .dng,
                 processedFormat: nil,
                 processedFileType: nil
             )
+            applySelectedPhotoDimensions(to: settings)
+            return settings
         }
 
         let settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: availableProcessedCodec()])
+        applySelectedPhotoDimensions(to: settings)
+        return settings
+    }
 
-        if let configuredMaxPhotoDimensions {
+    private func applySelectedPhotoDimensions(to settings: AVCapturePhotoSettings) {
+        if let selectedMaxPhotoDimensions {
+            settings.maxPhotoDimensions = selectedMaxPhotoDimensions
+        } else if let configuredMaxPhotoDimensions {
             settings.maxPhotoDimensions = configuredMaxPhotoDimensions
         }
-
-        return settings
     }
 
     private func availableProcessedCodec() -> AVVideoCodecType {
@@ -808,18 +1002,37 @@ final class CameraController: NSObject, ObservableObject {
         let minDuration = max(device.activeFormat.minExposureDuration.seconds, 1.0 / 10_000.0)
         let maxDuration = min(device.activeFormat.maxExposureDuration.seconds, 1)
         let clampedDuration = min(max(duration, minDuration), maxDuration)
+        let revision = manualExposureRevision + 1
+
+        manualExposureRevision = revision
+        manualExposureRequestDate = Date()
+        isManualExposureSettling = true
 
         do {
             try device.lockForConfiguration()
             let cmDuration = CMTimeMakeWithSeconds(clampedDuration, preferredTimescale: 1_000_000)
-            device.setExposureModeCustom(duration: cmDuration, iso: clampedISO, completionHandler: nil)
+            device.setExposureModeCustom(duration: cmDuration, iso: clampedISO) { [weak self] _ in
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.manualExposureRevision == revision else { return }
+                    self.isoValue = clampedISO
+                    self.shutterDuration = clampedDuration
+                    self.isManualExposure = true
+                    self.isManualExposureSettling = false
+                }
+            }
             device.unlockForConfiguration()
 
             isoValue = clampedISO
             shutterDuration = clampedDuration
             isManualExposure = true
             errorMessage = nil
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+                guard let self, self.manualExposureRevision == revision else { return }
+                self.isManualExposureSettling = false
+            }
         } catch {
+            isManualExposureSettling = false
             errorMessage = "手动曝光不可用"
         }
     }
@@ -889,6 +1102,93 @@ final class CameraController: NSObject, ObservableObject {
         }
     }
 
+    nonisolated private static func photoResolutions(for format: AVCaptureDevice.Format) -> [CameraPhotoResolution] {
+        let unique = Set(format.supportedMaxPhotoDimensions.map { CameraPhotoResolution($0) })
+        return unique.sorted { first, second in
+            photoArea(first.dimensions) > photoArea(second.dimensions)
+        }
+    }
+
+    nonisolated private static func photoResolutionOptions(
+        for format: CameraCaptureFormat,
+        all resolutions: [CameraPhotoResolution],
+        observedRawDimensions: CMVideoDimensions?
+    ) -> [CameraPhotoResolutionOption] {
+        let observedArea = photoArea(observedRawDimensions)
+        let observedTitle = CameraPhotoResolution.title(for: observedRawDimensions)
+
+        return resolutions.map { resolution in
+            var isAvailable = true
+            var unavailableReason: String?
+            let area = photoArea(resolution.dimensions)
+
+            switch format {
+            case .jpeg, .heif:
+                break
+            case .proRaw:
+                if observedArea > 0, area > observedArea {
+                    isAvailable = false
+                    unavailableReason = "当前 ProRAW 实测仅输出 \(observedTitle)"
+                }
+            case .bayerRaw:
+                let bayerRawCeilingMP = 13.0
+                if resolution.megapixels > bayerRawCeilingMP {
+                    isAvailable = false
+                    unavailableReason = observedArea > 0
+                        ? "Bayer RAW 当前实测仅输出 \(observedTitle)"
+                        : "Bayer RAW 当前仅开放 12MP"
+                }
+            }
+
+            return CameraPhotoResolutionOption(
+                resolution: resolution,
+                isAvailable: isAvailable,
+                unavailableReason: unavailableReason
+            )
+        }
+    }
+
+    nonisolated private static func defaultRawPreviewExposureBiasEV(for format: CameraCaptureFormat) -> Float {
+        switch format {
+        case .bayerRaw:
+            return 1.0
+        case .proRaw:
+            return 0.7
+        case .jpeg, .heif:
+            return 0
+        }
+    }
+
+    nonisolated private static func dngBaselineExposureEV(from metadata: [String: Any]) -> Float? {
+        let dngDictionary = metadata[kCGImagePropertyDNGDictionary as String] as? [String: Any]
+        let baselineExposure = dngDictionary?[kCGImagePropertyDNGBaselineExposure as String]
+            ?? metadata[kCGImagePropertyDNGBaselineExposure as String]
+
+        let value: Float?
+        if let number = baselineExposure as? NSNumber {
+            value = number.floatValue
+        } else if let string = baselineExposure as? String {
+            value = Float(string)
+        } else {
+            value = nil
+        }
+
+        guard let value else { return nil }
+        return min(max(value, -1.0), 2.5)
+    }
+
+    nonisolated private static func preferredPhotoResolution(
+        from resolutions: [CameraPhotoResolution],
+        preserving dimensions: CMVideoDimensions?
+    ) -> CameraPhotoResolution? {
+        if let dimensions,
+           let exactMatch = resolutions.first(where: { $0.width == dimensions.width && $0.height == dimensions.height }) {
+            return exactMatch
+        }
+
+        return resolutions.first
+    }
+
     nonisolated private static func photoArea(_ dimensions: CMVideoDimensions?) -> Int64 {
         guard let dimensions else { return 0 }
         return Int64(dimensions.width) * Int64(dimensions.height)
@@ -897,7 +1197,38 @@ final class CameraController: NSObject, ObservableObject {
     nonisolated private static func photoDimensionsDisplay(_ dimensions: CMVideoDimensions?) -> String {
         guard let dimensions else { return "--MP" }
         let megapixels = Double(photoArea(dimensions)) / 1_000_000.0
-        return "\(Int(megapixels.rounded()))MP"
+        return "\(Int(megapixels.rounded(.down)))MP"
+    }
+}
+
+extension CameraController: CLLocationManagerDelegate {
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        switch manager.authorizationStatus {
+        case .authorizedAlways, .authorizedWhenInUse:
+            locationCaptureStatus = "定位开启"
+            manager.startUpdatingLocation()
+        case .notDetermined:
+            locationCaptureStatus = "请求定位"
+        case .denied, .restricted:
+            locationCaptureStatus = "定位关闭"
+            manager.stopUpdatingLocation()
+        @unknown default:
+            locationCaptureStatus = "定位不可用"
+            manager.stopUpdatingLocation()
+        }
+    }
+
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        guard let location = locations.last, location.horizontalAccuracy >= 0 else { return }
+        lastKnownLocation = location
+        locationCaptureStatus = "定位开启"
+    }
+
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        guard locationManager.authorizationStatus == .authorizedAlways ||
+            locationManager.authorizationStatus == .authorizedWhenInUse else { return }
+
+        locationCaptureStatus = "定位等待"
     }
 }
 
@@ -920,14 +1251,25 @@ private final class PhotoCaptureDelegate: NSObject, AVCapturePhotoCaptureDelegat
     private var processedImage: UIImage?
     private var processedData: Data?
     private var rawData: Data?
+    private var processedMetadata: [String: Any] = [:]
+    private var rawMetadata: [String: Any] = [:]
     private let expectedFormat: CameraCaptureFormat
+    private let capturedAt: Date
+    private let location: CLLocation?
+    private let requestedDimensions: CMVideoDimensions?
     private var captureError: Error?
 
     init(
         expectedFormat: CameraCaptureFormat,
+        capturedAt: Date,
+        location: CLLocation?,
+        requestedDimensions: CMVideoDimensions?,
         completion: @escaping (Result<CameraCaptureResult, Error>) -> Void
     ) {
         self.expectedFormat = expectedFormat
+        self.capturedAt = capturedAt
+        self.location = location
+        self.requestedDimensions = requestedDimensions
         self.completion = completion
     }
 
@@ -948,10 +1290,12 @@ private final class PhotoCaptureDelegate: NSObject, AVCapturePhotoCaptureDelegat
 
         if photo.isRawPhoto {
             rawData = data
+            rawMetadata = photo.metadata
             return
         }
 
         processedData = data
+        processedMetadata = photo.metadata
         processedImage = UIImage(data: data)
 
         if let cgImage = processedImage?.cgImage {
@@ -971,24 +1315,53 @@ private final class PhotoCaptureDelegate: NSObject, AVCapturePhotoCaptureDelegat
             return
         }
 
+        let resolvedDimensions = Self.resolvedDimensions(
+            for: expectedFormat,
+            resolvedSettings: resolvedSettings,
+            fallback: requestedDimensions
+        )
+
         if let rawData {
             completion(.success(CameraCaptureResult(
                 format: expectedFormat,
                 processedImage: nil,
                 processedData: nil,
-                rawData: rawData
+                rawData: rawData,
+                metadata: rawMetadata,
+                location: location,
+                capturedAt: capturedAt,
+                requestedDimensions: requestedDimensions,
+                resolvedDimensions: resolvedDimensions
             )))
         } else if let image = processedImage {
             completion(.success(CameraCaptureResult(
                 format: expectedFormat == .heif ? .heif : .jpeg,
                 processedImage: image,
                 processedData: processedData,
-                rawData: nil
+                rawData: nil,
+                metadata: processedMetadata,
+                location: location,
+                capturedAt: capturedAt,
+                requestedDimensions: requestedDimensions,
+                resolvedDimensions: resolvedDimensions
             )))
         } else {
             // 没有 error 也没有数据：用 didFinishProcessingPhoto 阶段记录的错误
             completion(.failure(captureError ?? CameraCaptureError.invalidPhotoData))
         }
+    }
+
+    private static func resolvedDimensions(
+        for format: CameraCaptureFormat,
+        resolvedSettings: AVCaptureResolvedPhotoSettings,
+        fallback: CMVideoDimensions?
+    ) -> CMVideoDimensions? {
+        let dimensions = format.isRaw ? resolvedSettings.rawPhotoDimensions : resolvedSettings.photoDimensions
+        if dimensions.width > 0, dimensions.height > 0 {
+            return dimensions
+        }
+
+        return fallback
     }
 }
 

@@ -125,7 +125,7 @@ struct CameraPreviewUniforms {
     float4 matrixC0Saturation;  // xyz: color matrix column 0, w: saturation
     float4 matrixC1Fade;        // xyz: color matrix column 1, w: fade
     float4 matrixC2Flags;       // xyz: color matrix column 2, w: mirrored flag
-    float4 aspect;              // x: drawable aspect, y: source aspect
+    float4 aspect;              // x: drawable aspect, y: source aspect, z: linear preview gain
 };
 
 vertex CameraPreviewVertexOut cameraPreviewVertex(uint vertexID [[vertex_id]]) {
@@ -188,6 +188,7 @@ fragment half4 cameraPreviewFragment(
     float3 srgb = clamp(pFullRangeYuvToRgb(y, cbcr), 0.0, 1.0);
 
     float3 linear = pSrgbToLinear(srgb);
+    linear *= max(uniforms.aspect.z, 0.001);
     linear *= uniforms.wbContrast.xyz;
     linear = clamp(linear, 0.0, 1.0);
 

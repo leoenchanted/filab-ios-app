@@ -24,7 +24,7 @@ Filab 是一个 iOS SwiftUI 照片胶片模拟应用。它把照片导入、胶�
 
 主入口分类：
 
-- `相机`：页面层使用系统原生 `TabView(selection:)` 管理相册 / 设置两个页面，但不要给页面添加 `.tabItem`，否则 iOS 26 会生成第二条系统浮动 tabbar。这个 `TabView` 应使用 `.tabViewStyle(.page(indexDisplayMode: .never))`，只保留页面容器和 selection 能力。底部唯一可见入口是覆盖在 `TabView` 上方的 `MainBottomDock`，视觉参考 iOS 26 电话 App：左侧一个胶囊 tab group，当前 tab 在内部显示灰色选中 pill，右侧是独立圆形相机主按钮。这个 dock 里的左侧 tab bar 和右侧相机按钮必须放在同一个 SwiftUI `GlassEffectContainer` 内，分别使用系统原生 `glassEffect(.regular, ...)` / `glassEffect(.regular.interactive(true), ...)` 和稳定的 `glassEffectID`，这样相机按钮按压靠近时才能获得系统原生 Liquid Glass metaball / morphing 融合；不要用自绘毛玻璃或长期相连的形状模拟。相机使用 AVFoundation 接入系统相机，支持权限请求、前后摄切换、系统级变焦、点按对焦/测光、EV、WB、格式/画幅入口和胶片实时 Metal 预览。胶片模式取景器使用 `AVCaptureVideoDataOutput` + `CVMetalTextureCache` + `MTKView`，不再把 SwiftUI `.colorEffect()` 直接套到 `AVCaptureVideoPreviewLayer` 上；RAW / 无胶片模式仍使用系统 `AVCaptureVideoPreviewLayer`。相机横竖屏方向必须拆成两条：实时取景器保持稳定取景方向，不随横竖屏旋转；照片输出用 `AVCaptureDevice.RotationCoordinator.videoRotationAngleForHorizonLevelCapture` 更新 `AVCapturePhotoOutput` 的 `videoRotationAngle`，不要把同一个 capture angle 套到 `AVCaptureVideoDataOutput` 上。JPEG / HEIF 拍照后会把当前胶片烘焙进照片并直接写入系统相册；RAW 拍照会保存真正的 DNG 原始文件，不应用胶片效果。
+- `相机`：页面层使用系统原生 `TabView(selection:)` 管理相册 / 设置两个页面，但不要给页面添加 `.tabItem`，否则 iOS 26 会生成第二条系统浮动 tabbar。这个 `TabView` 应使用 `.tabViewStyle(.page(indexDisplayMode: .never))`，只保留页面容器和 selection 能力。底部唯一可见入口是覆盖在 `TabView` 上方的 `MainBottomDock`，视觉参考 iOS 26 电话 App：左侧一个胶囊 tab group，当前 tab 在内部显示灰色选中 pill，右侧是独立圆形相机主按钮。这个 dock 里的左侧 tab bar 和右侧相机按钮必须放在同一个 SwiftUI `GlassEffectContainer` 内，分别使用系统原生 `glassEffect(.regular, ...)` / `glassEffect(.regular.interactive(true), ...)` 和稳定的 `glassEffectID`，这样相机按钮按压靠近时才能获得系统原生 Liquid Glass metaball / morphing 融合；不要用自绘毛玻璃或长期相连的形状模拟。相机使用 AVFoundation 接入系统相机，支持权限请求、前后摄切换、系统级变焦、点按对焦/测光、EV、WB、格式/画幅/分辨率入口和胶片实时 Metal 预览。胶片模式取景器使用 `AVCaptureVideoDataOutput` + `CVMetalTextureCache` + `MTKView`，不再把 SwiftUI `.colorEffect()` 直接套到 `AVCaptureVideoPreviewLayer` 上；RAW / 无胶片模式仍使用系统 `AVCaptureVideoPreviewLayer`。相机横竖屏方向必须拆成两条：实时取景器保持稳定取景方向，不随横竖屏旋转；照片输出用 `AVCaptureDevice.RotationCoordinator.videoRotationAngleForHorizonLevelCapture` 更新 `AVCapturePhotoOutput` 的 `videoRotationAngle`，不要把同一个 capture angle 套到 `AVCaptureVideoDataOutput` 上。JPEG / HEIF 拍照后会把当前胶片烘焙进照片并直接写入系统相册；RAW 拍照会保存真正的 DNG 原始文件，不应用胶片效果。拍照会尽量记录当前定位，JPEG / HEIF 胶片输出通过 ImageIO 写入 EXIF / GPS metadata，RAW DNG 通过 Photos asset location 保存地点信息。
 - `相册`：照片导入、本地编辑历史、搜索筛选和批量管理。
 - `设置`：外观、导出、保存和缓存等全局设置。
 
@@ -33,9 +33,9 @@ Filab 是一个 iOS SwiftUI 照片胶片模拟应用。它把照片导入、胶�
 - `App/FilabApp.swift`：App 入口。
 - `App/ContentView.swift`：App 外壳、底部 Liquid Glass dock、右侧圆形相机主按钮、全屏相机和编辑器展示。编辑器 `onDismiss` 必须遵守固定顺序：①快照取出数据 → ②立即清空 ViewModel 全部 `@Published` 状态 → ③调用 `PhotoHistoryStore` 异步存盘接口；禁止在 `onDismiss` 内做任何同步磁盘 IO（详见线程与性能约定）。
 - `Features/Camera/CameraView.swift`：全屏相机页 SwiftUI 界面、权限状态展示、专业相机风格读数条、左侧每页 5 个工具的分页工具栏、直方图、1x/2x 快捷变焦、捏合变焦、点按对焦反馈、ISO / 快门 / EV / WB / 胶片两层选择调节区、格式和画幅当前值显示、快门和自拍入口。胶片模式取景器入口在这里切到 `MetalCameraPreviewView`；RAW / 无胶片模式切回 `CameraPreviewView`。
-- `Features/Camera/CameraController.swift`：AVFoundation 系统相机权限、Session 配置、前后摄切换、设备级变焦、点按对焦/测光、EV、WB、照片格式、实时视频帧分发 and 拍照回调。内部维护专用 `sessionQueue = DispatchQueue(label: "filab.camera.session")`，所有 `session.startRunning` / `stopRunning` / `beginConfiguration` / `commitConfiguration` 均在此队列执行，不可在 `@MainActor` 主线程直接调用。拍摄 JPEG / HEIF 时必须通过当前 active format 的 `supportedMaxPhotoDimensions` 选择最高照片尺寸，并同时设置 `AVCapturePhotoOutput.maxPhotoDimensions` 和每次 `AVCapturePhotoSettings.maxPhotoDimensions`；不要恢复到默认 settings，否则系统会倾向使用较小尺寸。纯 RAW 格式不设置 `photoQualityPrioritization`（详见线程与性能约定）。`AVCaptureVideoDataOutput` 同时服务直方图和 Metal 取景器帧源，不要再额外添加第二路 video data output。
-- `Features/Camera/CameraOptions.swift`：相机页专用枚举和预览 helper，包含画幅、拍摄格式、专业控制面板分类，以及基于 `FilmPreset` 的 Metal 预览参数（白平衡、色彩矩阵、曲线点等）。
-- `Features/Camera/CameraPhotoLibrarySaver.swift`：相机拍摄后的系统相册写入，负责 JPEG / HEIF 编码、RAW DNG 临时文件导入 and Photos add-only 权限请求。
+- `Features/Camera/CameraController.swift`：AVFoundation 系统相机权限、Session 配置、前后摄切换、设备级变焦、点按对焦/测光、EV、WB、照片格式、照片分辨率、定位采集、实时视频帧分发 and 拍照回调。内部维护专用 `sessionQueue = DispatchQueue(label: "filab.camera.session")`，所有 `session.startRunning` / `stopRunning` / `beginConfiguration` / `commitConfiguration` 均在此队列执行，不可在 `@MainActor` 主线程直接调用。照片分辨率来自当前 `activeFormat.supportedMaxPhotoDimensions`，`photoOutput.maxPhotoDimensions` 保持最大输出上限，每次拍摄用 `AVCapturePhotoSettings.maxPhotoDimensions` 应用用户当前选择；RAW 和 JPEG / HEIF 都必须显式设置，避免系统默认较小尺寸。纯 RAW 格式不设置 `photoQualityPrioritization`（详见线程与性能约定）。`AVCaptureVideoDataOutput` 同时服务直方图和 Metal 取景器帧源，不要再额外添加第二路 video data output。
+- `Features/Camera/CameraOptions.swift`：相机页专用枚举和预览 helper，包含画幅、拍摄格式、照片分辨率、专业控制面板分类，以及基于 `FilmPreset` 的 Metal 预览参数（白平衡、色彩矩阵、曲线点等）。
+- `Features/Camera/CameraPhotoLibrarySaver.swift`：相机拍摄后的系统相册写入，负责 JPEG / HEIF ImageIO 编码、EXIF / GPS metadata 合并、RAW DNG 临时文件导入、Photos asset location and Photos add-only 权限请求。
 - `Features/Camera/CameraPreviewView.swift`：`AVCaptureVideoPreviewLayer` 的 SwiftUI 桥接。现在只用于 RAW / 无胶片模式或系统 preview fallback；胶片模式不要再在它上面叠 `.colorEffect()`。
 - `Features/Camera/MetalCameraPreviewView.swift`：胶片模式实时 Metal 取景器。内部用 `MTKView`、`CVMetalTextureCacheCreateTextureFromImage` 把 `AVCaptureVideoDataOutput` 的 Y / CbCr plane 包成 Metal textures，并用 `PreviewCore.metal` 的 camera preview shader 渲染胶片色彩。
 - `Features/Library/HomeView.swift`：相册 / 历史记录 / 搜索筛选 / 批量管理界面。
@@ -155,10 +155,19 @@ Filab 是一个 iOS SwiftUI 照片胶片模拟应用。它把照片导入、胶�
 ### 最高照片尺寸（CameraController）
 
 - 1x 只代表焦段 / 当前镜头，不代表 AVFoundation 会默认输出传感器最高像素。
-- `AVCapturePhotoSettings.maxPhotoDimensions` 默认会使用当前 active format 支持列表里的较小尺寸；JPEG / HEIF 高像素拍摄必须显式设置。
+- `AVCapturePhotoSettings.maxPhotoDimensions` 默认会使用当前 active format 支持列表里的较小尺寸；JPEG / HEIF / RAW 高像素拍摄都必须显式设置。
 - 配置相机时优先选择 `supportedMaxPhotoDimensions` 面积最大的设备和 active format，并在 `startRunning()` 前设置 `photoOutput.maxPhotoDimensions`。
-- 每次 JPEG / HEIF 拍照创建 `AVCapturePhotoSettings` 后，也要把 `settings.maxPhotoDimensions` 设置为同一个最大尺寸。
-- 取景器右上角显示当前 pipeline 的最大 MP，并在真机日志打印配置尺寸和实际回调照片像素，用于确认 48MP / 24MP / 20MP 等实际输出。
+- `photoOutput.maxPhotoDimensions` 应作为当前 active format 的最大输出上限；用户选择的 48MP / 24MP / 12MP 等尺寸通过每次拍照的 `settings.maxPhotoDimensions` 应用。
+- 分辨率菜单只展示当前 `activeFormat.supportedMaxPhotoDimensions` 暴露的合法尺寸；不要硬编码某台 iPhone 一定有 48MP / 24MP / 12MP。
+- 取景器右上角显示当前选择的 MP，拍照完成提示使用 `AVCaptureResolvedPhotoSettings` 回调出的实际像素尺寸，用于确认 RAW / HEIF / JPEG 最终输出。
+
+### 照片 Metadata（CameraController / CameraPhotoLibrarySaver）
+
+- 相机页会请求 When In Use 定位权限；定位失败或用户拒绝时不能影响拍照，只是不写 GPS。
+- `PhotoCaptureDelegate` 要保留 `AVCapturePhoto.metadata`、capture 时间、最近一次有效 `CLLocation` 和 resolved photo dimensions。
+- JPEG / HEIF 胶片输出必须通过 ImageIO 写入，合并原始 metadata、EXIF DateTime、GPS 字典和 `TIFFSoftware = Filab`；不要用 `UIImage.jpegData()` / 简单 HEIF helper 绕开 metadata。
+- 胶片渲染后的图片像素已经规格化方向，保存 metadata 时 `kCGImagePropertyOrientation` 固定为 1。
+- RAW DNG 的原始文件数据不重写；地点通过 `PHAssetCreationRequest.location` 挂到 Photos 资产上。
 
 ### PhotoCaptureDelegate 错误处理（CameraController）
 

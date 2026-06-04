@@ -40,7 +40,7 @@ struct CameraView: View {
 
     private var filmPanelStatus: String {
         if camera.captureFormat.isRaw {
-            return "\(camera.captureFormat.title) 不烘焙胶片"
+            return "\(camera.captureFormat.title) +\(String(format: "%.1f", camera.rawPreviewExposureBiasEV))EV 预览"
         }
 
         return camera.selectedFilmPreset?.cameraShortName ?? "OFF"
@@ -195,6 +195,31 @@ struct CameraView: View {
                     }
 
                     Menu {
+                        if camera.photoResolutionOptions.isEmpty {
+                            Text("当前设备未提供可选分辨率")
+                        } else {
+                            ForEach(camera.photoResolutionOptions) { option in
+                                Button {
+                                    camera.setPhotoResolution(option.resolution)
+                                } label: {
+                                    let title = option.unavailableReason.map {
+                                        "\(option.title)  \(option.detail)  \($0)"
+                                    } ?? "\(option.title)  \(option.detail)"
+                                    Label(
+                                        title,
+                                        systemImage: camera.selectedPhotoResolution == option.resolution
+                                            ? "checkmark"
+                                            : (option.isAvailable ? "circle" : "lock")
+                                    )
+                                }
+                                .disabled(!option.isAvailable)
+                            }
+                        }
+                    } label: {
+                        CameraHeaderTool(icon: "square.grid.3x3", title: camera.selectedPhotoResolutionDisplay)
+                    }
+
+                    Menu {
                         Picker("画幅", selection: $camera.aspectRatio) {
                             ForEach(CameraAspectRatio.allCases) { ratio in
                                 Text(ratio.title).tag(ratio)
@@ -346,10 +371,11 @@ struct CameraView: View {
         ZStack {
             if camera.isAuthorized, camera.isConfigured {
                 Group {
-                    if let activePreviewPreset {
+                    if camera.captureFormat.isRaw || activePreviewPreset != nil {
                         MetalCameraPreviewView(
                             frameSource: camera.previewFrameSource,
                             preset: activePreviewPreset,
+                            rawPreviewExposureBiasEV: camera.rawPreviewExposureBiasEV,
                             isMirrored: camera.cameraPosition == .front,
                             onTapToFocus: handleFocusTap(devicePoint:viewPoint:)
                         )
@@ -459,7 +485,35 @@ struct CameraView: View {
 
                 CameraDeckDivider()
 
-                CameraParameterCell(title: "质量", value: "高", detail: "无损压缩", accent: cameraAccent)
+                Menu {
+                    if camera.photoResolutionOptions.isEmpty {
+                        Text("当前设备未提供可选分辨率")
+                    } else {
+                        ForEach(camera.photoResolutionOptions) { option in
+                            Button {
+                                camera.setPhotoResolution(option.resolution)
+                            } label: {
+                                let title = option.unavailableReason.map {
+                                    "\(option.title)  \(option.detail)  \($0)"
+                                } ?? "\(option.title)  \(option.detail)"
+                                Label(
+                                    title,
+                                    systemImage: camera.selectedPhotoResolution == option.resolution
+                                        ? "checkmark"
+                                        : (option.isAvailable ? "circle" : "lock")
+                                )
+                            }
+                            .disabled(!option.isAvailable)
+                        }
+                    }
+                } label: {
+                    CameraParameterCell(
+                        title: "分辨率",
+                        value: camera.selectedPhotoResolutionDisplay,
+                        detail: camera.photoResolutionDetail,
+                        accent: cameraAccent
+                    )
+                }
 
                 CameraDeckDivider()
 
@@ -1002,7 +1056,10 @@ struct CameraView: View {
 
         do {
             try await onPhotoCaptured(capture, preset)
-            showCaptureMessage(capture.isRaw ? "\(capture.format.title) DNG 已保存到系统相册" : "已应用胶片并保存到系统相册")
+            let resolution = capture.resolutionDisplay
+            let format = capture.isRaw ? "\(capture.format.title) DNG" : capture.format.title
+            let suffix = resolution == "--MP" ? "" : " \(resolution)"
+            showCaptureMessage(capture.isRaw ? "\(format)\(suffix) 已保存到系统相册" : "\(format)\(suffix) 已应用胶片并保存")
         } catch {
             showCaptureMessage(error.localizedDescription)
         }

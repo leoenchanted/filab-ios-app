@@ -9,7 +9,8 @@ import UIKit
 
 struct MetalCameraPreviewView: UIViewRepresentable {
     let frameSource: CameraPreviewFrameSource
-    let preset: FilmPreset
+    let preset: FilmPreset?
+    let rawPreviewExposureBiasEV: Float
     let isMirrored: Bool
     let onTapToFocus: (CGPoint, CGPoint) -> Void
 
@@ -25,7 +26,11 @@ struct MetalCameraPreviewView: UIViewRepresentable {
         view.onTapToFocus = onTapToFocus
         view.isMirrored = isMirrored
         view.configure(renderer: renderer)
-        renderer.update(preset: preset, isMirrored: isMirrored)
+        renderer.update(
+            preset: preset,
+            rawPreviewExposureBiasEV: rawPreviewExposureBiasEV,
+            isMirrored: isMirrored
+        )
         return view
     }
 
@@ -34,7 +39,11 @@ struct MetalCameraPreviewView: UIViewRepresentable {
         uiView.onTapToFocus = onTapToFocus
         uiView.isMirrored = isMirrored
         context.coordinator.renderer?.frameSource = frameSource
-        context.coordinator.renderer?.update(preset: preset, isMirrored: isMirrored)
+        context.coordinator.renderer?.update(
+            preset: preset,
+            rawPreviewExposureBiasEV: rawPreviewExposureBiasEV,
+            isMirrored: isMirrored
+        )
     }
 
     final class Coordinator {
@@ -164,12 +173,16 @@ final class MetalCameraPreviewRenderer: NSObject, MTKViewDelegate {
         setupMetal()
     }
 
-    func update(preset: FilmPreset, isMirrored: Bool) {
+    func update(preset: FilmPreset?, rawPreviewExposureBiasEV: Float, isMirrored: Bool) {
         guard let device else { return }
 
-        let previewUniforms = CameraPreviewUniforms(preset: preset, isMirrored: isMirrored)
+        let previewUniforms = CameraPreviewUniforms(
+            preset: preset,
+            rawPreviewExposureBiasEV: rawPreviewExposureBiasEV,
+            isMirrored: isMirrored
+        )
         let updatedCurveTexture: MTLTexture?
-        if lastPreset != preset {
+        if lastPreset != preset || curveTexture == nil {
             updatedCurveTexture = Self.makeCurveTexture(for: preset, device: device)
         } else {
             updatedCurveTexture = nil
@@ -310,7 +323,7 @@ final class MetalCameraPreviewRenderer: NSObject, MTKViewDelegate {
         )
     }
 
-    private static func makeCurveTexture(for preset: FilmPreset, device: MTLDevice) -> MTLTexture? {
+    private static func makeCurveTexture(for preset: FilmPreset?, device: MTLDevice) -> MTLTexture? {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .r8Unorm,
             width: 256,
@@ -323,7 +336,9 @@ final class MetalCameraPreviewRenderer: NSObject, MTKViewDelegate {
 
         var lut = [UInt8](repeating: 0, count: 256)
         for index in 0..<256 {
-            let value = applyCurve(Float(index), points: preset.curve.points)
+            let value = preset.map {
+                applyCurve(Float(index), points: $0.curve.points)
+            } ?? Float(index)
             lut[index] = UInt8(min(max(value.rounded(), 0), 255))
         }
 
@@ -376,20 +391,30 @@ private struct CameraPreviewUniforms {
     var matrixC0Saturation = SIMD4<Float>(1, 0, 0, 1)
     var matrixC1Fade = SIMD4<Float>(0, 1, 0, 0)
     var matrixC2Flags = SIMD4<Float>(0, 0, 1, 0)
-    var aspect = SIMD4<Float>(1, 1, 0, 0)
+    var aspect = SIMD4<Float>(1, 1, 1, 0)
 
     init() {}
 
-    init(preset: FilmPreset, isMirrored: Bool) {
-        let wb = preset.previewWBVector
-        let matrix = preset.previewColorMatrix
-        let c0 = matrix.columns.0
-        let c1 = matrix.columns.1
-        let c2 = matrix.columns.2
+    init(preset: FilmPreset?, rawPreviewExposureBiasEV: Float, isMirrored: Bool) {
+        if let preset {
+            let wb = preset.previewWBVector
+            let matrix = preset.previewColorMatrix
+            let c0 = matrix.columns.0
+            let c1 = matrix.columns.1
+            let c2 = matrix.columns.2
 
-        wbContrast = SIMD4<Float>(wb.x, wb.y, wb.z, Float(preset.contrast))
-        matrixC0Saturation = SIMD4<Float>(c0.x, c0.y, c0.z, Float(preset.saturation))
-        matrixC1Fade = SIMD4<Float>(c1.x, c1.y, c1.z, Float(preset.fade))
-        matrixC2Flags = SIMD4<Float>(c2.x, c2.y, c2.z, isMirrored ? 1 : 0)
+            wbContrast = SIMD4<Float>(wb.x, wb.y, wb.z, Float(preset.contrast))
+            matrixC0Saturation = SIMD4<Float>(c0.x, c0.y, c0.z, Float(preset.saturation))
+            matrixC1Fade = SIMD4<Float>(c1.x, c1.y, c1.z, Float(preset.fade))
+            matrixC2Flags = SIMD4<Float>(c2.x, c2.y, c2.z, isMirrored ? 1 : 0)
+            aspect.z = 1
+        } else {
+            let rawPreviewGain = powf(2, rawPreviewExposureBiasEV)
+            wbContrast = SIMD4<Float>(1, 1, 1, 1)
+            matrixC0Saturation = SIMD4<Float>(1, 0, 0, 1)
+            matrixC1Fade = SIMD4<Float>(0, 1, 0, 0)
+            matrixC2Flags = SIMD4<Float>(0, 0, 1, isMirrored ? 1 : 0)
+            aspect.z = max(rawPreviewGain, 0.01)
+        }
     }
 }

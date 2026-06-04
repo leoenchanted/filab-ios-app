@@ -118,7 +118,11 @@ struct ContentView: View {
                 throw CameraPhotoLibraryError.saveFailed
             }
 
-            try await CameraPhotoLibrarySaver.saveRawDNG(rawData, format: result.format)
+            try await CameraPhotoLibrarySaver.saveRawDNG(
+                rawData,
+                format: result.format,
+                location: result.location
+            )
             return
         }
 
@@ -127,7 +131,13 @@ struct ContentView: View {
         }
 
         guard let cameraPreset else {
-            try await CameraPhotoLibrarySaver.saveImage(image, format: result.format)
+            try await CameraPhotoLibrarySaver.saveImage(
+                image,
+                format: result.format,
+                metadata: result.metadata,
+                location: result.location,
+                capturedAt: result.capturedAt
+            )
             return
         }
 
@@ -137,7 +147,13 @@ struct ContentView: View {
         renderViewModel.loadImage(image)
 
         let outputImage = await renderViewModel.renderFullResolutionImage() ?? image
-        try await CameraPhotoLibrarySaver.saveImage(outputImage, format: result.format)
+        try await CameraPhotoLibrarySaver.saveImage(
+            outputImage,
+            format: result.format,
+            metadata: result.metadata,
+            location: result.location,
+            capturedAt: result.capturedAt
+        )
     }
 }
 

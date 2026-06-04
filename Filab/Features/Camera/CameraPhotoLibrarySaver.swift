@@ -1,15 +1,17 @@
+import CoreLocation
 import ImageIO
 import Photos
 import UIKit
 import UniformTypeIdentifiers
 
 enum CameraPhotoLibrarySaver {
-    static func saveRawDNG(_ data: Data, format: CameraCaptureFormat) async throws {
+    static func saveRawDNG(_ data: Data, format: CameraCaptureFormat, location: CLLocation?) async throws {
         try await requestAddOnlyAccess()
         let fileURL = try writeTemporaryFile(data: data, extension: "dng")
 
         try await performPhotoLibraryChanges {
             let request = PHAssetCreationRequest.forAsset()
+            request.location = location
             let options = PHAssetResourceCreationOptions()
             options.originalFilename = "Filab_\(format.rawValue)_\(timestamp()).dng"
             options.shouldMoveFile = true
@@ -17,19 +19,37 @@ enum CameraPhotoLibrarySaver {
         }
     }
 
-    static func saveImage(_ image: UIImage, format: CameraCaptureFormat) async throws {
+    static func saveImage(
+        _ image: UIImage,
+        format: CameraCaptureFormat,
+        metadata: [String: Any],
+        location: CLLocation?,
+        capturedAt: Date
+    ) async throws {
         try await requestAddOnlyAccess()
 
         let output: (data: Data, fileExtension: String, filename: String)
 
         switch format {
         case .heif:
-            guard let data = image.heifData(quality: 0.95) else {
+            guard let data = image.encodedData(
+                typeIdentifier: UTType.heic.identifier,
+                quality: 0.95,
+                metadata: metadata,
+                location: location,
+                capturedAt: capturedAt
+            ) else {
                 throw CameraPhotoLibraryError.encodingFailed
             }
             output = (data, "heic", "Filab_\(timestamp()).heic")
         case .jpeg, .proRaw, .bayerRaw:
-            guard let data = image.jpegData(compressionQuality: 0.96) else {
+            guard let data = image.encodedData(
+                typeIdentifier: UTType.jpeg.identifier,
+                quality: 0.96,
+                metadata: metadata,
+                location: location,
+                capturedAt: capturedAt
+            ) else {
                 throw CameraPhotoLibraryError.encodingFailed
             }
             output = (data, "jpg", "Filab_\(timestamp()).jpg")
@@ -39,6 +59,7 @@ enum CameraPhotoLibrarySaver {
 
         try await performPhotoLibraryChanges {
             let request = PHAssetCreationRequest.forAsset()
+            request.location = location
             let options = PHAssetResourceCreationOptions()
             options.originalFilename = output.filename
             options.shouldMoveFile = true
@@ -111,23 +132,37 @@ enum CameraPhotoLibraryError: LocalizedError {
 }
 
 private extension UIImage {
-    func heifData(quality: CGFloat) -> Data? {
-        guard let cgImage else { return nil }
+    func encodedData(
+        typeIdentifier: String,
+        quality: CGFloat,
+        metadata: [String: Any],
+        location: CLLocation?,
+        capturedAt: Date
+    ) -> Data? {
+        let imageForEncoding = normalizedOrientation()
+        guard let cgImage = imageForEncoding.cgImage else { return nil }
 
         let data = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(
             data,
-            UTType.heic.identifier as CFString,
+            typeIdentifier as CFString,
             1,
             nil
         ) else {
             return nil
         }
 
+        let properties = Self.metadataProperties(
+            sourceMetadata: metadata,
+            location: location,
+            capturedAt: capturedAt,
+            quality: quality
+        )
+
         CGImageDestinationAddImage(
             destination,
             cgImage,
-            [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary
+            properties as CFDictionary
         )
 
         guard CGImageDestinationFinalize(destination) else {
@@ -135,5 +170,77 @@ private extension UIImage {
         }
 
         return data as Data
+    }
+
+    private static func metadataProperties(
+        sourceMetadata: [String: Any],
+        location: CLLocation?,
+        capturedAt: Date,
+        quality: CGFloat
+    ) -> [String: Any] {
+        var properties = sourceMetadata
+        properties[kCGImageDestinationLossyCompressionQuality as String] = quality
+        properties[kCGImagePropertyOrientation as String] = 1
+
+        var exif = properties[kCGImagePropertyExifDictionary as String] as? [String: Any] ?? [:]
+        let exifDate = exifDateString(for: capturedAt)
+        exif[kCGImagePropertyExifDateTimeOriginal as String] = exif[kCGImagePropertyExifDateTimeOriginal as String] ?? exifDate
+        exif[kCGImagePropertyExifDateTimeDigitized as String] = exif[kCGImagePropertyExifDateTimeDigitized as String] ?? exifDate
+        properties[kCGImagePropertyExifDictionary as String] = exif
+
+        var tiff = properties[kCGImagePropertyTIFFDictionary as String] as? [String: Any] ?? [:]
+        tiff[kCGImagePropertyTIFFMake as String] = tiff[kCGImagePropertyTIFFMake as String] ?? "Apple"
+        tiff[kCGImagePropertyTIFFModel as String] = tiff[kCGImagePropertyTIFFModel as String] ?? UIDevice.current.localizedModel
+        tiff[kCGImagePropertyTIFFSoftware as String] = "Filab"
+        properties[kCGImagePropertyTIFFDictionary as String] = tiff
+
+        if let location {
+            properties[kCGImagePropertyGPSDictionary as String] = gpsMetadata(for: location)
+        }
+
+        return properties
+    }
+
+    private static func gpsMetadata(for location: CLLocation) -> [String: Any] {
+        let coordinate = location.coordinate
+        var gps: [String: Any] = [
+            kCGImagePropertyGPSLatitudeRef as String: coordinate.latitude >= 0 ? "N" : "S",
+            kCGImagePropertyGPSLatitude as String: abs(coordinate.latitude),
+            kCGImagePropertyGPSLongitudeRef as String: coordinate.longitude >= 0 ? "E" : "W",
+            kCGImagePropertyGPSLongitude as String: abs(coordinate.longitude),
+            kCGImagePropertyGPSDateStamp as String: gpsDateString(for: location.timestamp),
+            kCGImagePropertyGPSTimeStamp as String: gpsTimeString(for: location.timestamp),
+            kCGImagePropertyGPSMapDatum as String: "WGS-84"
+        ]
+
+        if location.verticalAccuracy >= 0 {
+            gps[kCGImagePropertyGPSAltitudeRef as String] = location.altitude >= 0 ? 0 : 1
+            gps[kCGImagePropertyGPSAltitude as String] = abs(location.altitude)
+        }
+
+        return gps
+    }
+
+    private static func exifDateString(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
+        return formatter.string(from: date)
+    }
+
+    private static func gpsDateString(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy:MM:dd"
+        return formatter.string(from: date)
+    }
+
+    private static func gpsTimeString(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter.string(from: date)
     }
 }

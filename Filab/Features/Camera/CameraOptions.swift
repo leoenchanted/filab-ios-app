@@ -1,3 +1,4 @@
+import CoreMedia
 import simd
 import SwiftUI
 
@@ -89,6 +90,76 @@ enum CameraCaptureFormat: String, CaseIterable, Identifiable {
         case .jpeg, .heif:
             return ""
         }
+    }
+}
+
+nonisolated struct CameraPhotoResolution: Identifiable, Hashable, Sendable {
+    let width: Int32
+    let height: Int32
+
+    init(width: Int32, height: Int32) {
+        self.width = width
+        self.height = height
+    }
+
+    init(_ dimensions: CMVideoDimensions) {
+        self.width = dimensions.width
+        self.height = dimensions.height
+    }
+
+    var id: String {
+        "\(width)x\(height)"
+    }
+
+    var dimensions: CMVideoDimensions {
+        CMVideoDimensions(width: width, height: height)
+    }
+
+    var megapixels: Double {
+        Double(width) * Double(height) / 1_000_000.0
+    }
+
+    var title: String {
+        Self.title(for: dimensions)
+    }
+
+    var detail: String {
+        Self.pixelDisplay(for: dimensions)
+    }
+
+    static func title(for dimensions: CMVideoDimensions?) -> String {
+        guard let dimensions, dimensions.width > 0, dimensions.height > 0 else {
+            return "--MP"
+        }
+
+        let megapixels = Double(dimensions.width) * Double(dimensions.height) / 1_000_000.0
+        return "\(Int(megapixels.rounded(.down)))MP"
+    }
+
+    static func pixelDisplay(for dimensions: CMVideoDimensions?) -> String {
+        guard let dimensions, dimensions.width > 0, dimensions.height > 0 else {
+            return "设备默认"
+        }
+
+        return "\(dimensions.width)x\(dimensions.height)"
+    }
+}
+
+nonisolated struct CameraPhotoResolutionOption: Identifiable, Hashable, Sendable {
+    let resolution: CameraPhotoResolution
+    let isAvailable: Bool
+    let unavailableReason: String?
+
+    var id: String {
+        resolution.id
+    }
+
+    var title: String {
+        resolution.title
+    }
+
+    var detail: String {
+        resolution.detail
     }
 }
 

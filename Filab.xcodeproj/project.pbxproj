@@ -411,6 +411,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSCameraUsageDescription = "需要访问相机权限以拍摄照片并保存到系统相册";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "需要访问当前位置以像系统相机一样为拍摄的照片写入地点信息";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "需要访问相册权限以保存编辑后的照片";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "需要访问相册权限以选择照片进行编辑";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -446,6 +447,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSCameraUsageDescription = "需要访问相机权限以拍摄照片并保存到系统相册";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "需要访问当前位置以像系统相机一样为拍摄的照片写入地点信息";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "需要访问相册权限以保存编辑后的照片";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "需要访问相册权限以选择照片进行编辑";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
